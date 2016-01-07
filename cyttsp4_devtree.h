@@ -1,16 +1,12 @@
 /*
- * cyttsp4_spi.h
- * Cypress TrueTouch(TM) Standard Product V4 SPI Driver module.
+ * cyttsp4_devtree.h
+ * Cypress TrueTouch(TM) Standard Product V4 Device Tree Support Driver
  * For use with Cypress Txx4xx parts.
  * Supported parts include:
  * TMA4XX
  * TMA1036
  *
- * Copyright (C) 2012 Cypress Semiconductor
- * Copyright (C) 2011 Sony Ericsson Mobile Communications AB.
- * Copyright (C) 2014 Sony Mobile Communications AB.
- *
- * Author: Aleksej Makarov <aleksej.makarov@sonyericsson.com>
+ * Copyright (C) 2013 Cypress Semiconductor
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -28,13 +24,13 @@
  *
  * Contact Cypress Semiconductor at www.cypress.com <ttdrivers@cypress.com>
  *
- * NOTE: This file has been modified by Sony Mobile Communications AB.
- * Modifications are licensed under the License.
  */
 
-#ifndef _LINUX_CYTTSP4_SPI_H
-#define _LINUX_CYTTSP4_SPI_H
-
-#define CYTTSP4_SPI_NAME "cyttsp4_spi_adapter"
-
-#endif /* _LINUX_CYTTSP4_SPI_H */
+#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_DEVICETREE_SUPPORT
+extern int cyttsp4_devtree_register_devices(struct device *adap_dev);
+#else
+static inline int cyttsp4_devtree_register_devices(struct device *adap_dev)
+{
+	return 0;
+}
+#endif

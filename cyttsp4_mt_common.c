@@ -8,7 +8,6 @@
  *
  * Copyright (C) 2012 Cypress Semiconductor
  * Copyright (C) 2011 Sony Ericsson Mobile Communications AB.
- * Copyright (C) 2014 Sony Mobile Communications AB.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -26,75 +25,43 @@
  *
  * Contact Cypress Semiconductor at www.cypress.com <ttdrivers@cypress.com>
  *
- * NOTE: This file has been modified by Sony Mobile Communications AB.
- * Modifications are licensed under the License.
  */
 
 #include "cyttsp4_mt_common.h"
-#ifdef CONFIG_FB
-#include <linux/notifier.h>
-#include <linux/fb.h>
+
+#if defined(CONFIG_FB)
+static int fb_notifier_callback(struct notifier_block *self,
+				unsigned long event, void *data);
 #endif
+
+#if defined(CONFIG_PM_SLEEP) || defined(CONFIG_PM_RUNTIME)
+static int cyttsp4_mt_suspend(struct device *dev);
+static int cyttsp4_mt_resume(struct device *dev);
+#endif
+
 
 static void cyttsp4_lift_all(struct cyttsp4_mt_data *md)
 {
 	if (!md->si)
 		return;
 
-	if (md->num_prv_tch != 0) {
+	if (md->num_prv_rec != 0) {
 		if (md->mt_function.report_slot_liftoff)
-			md->mt_function.report_slot_liftoff(md);
+			md->mt_function.report_slot_liftoff(md,
+				md->si->si_ofs.tch_abs[CY_TCH_T].max);
 		input_sync(md->input);
-		md->num_prv_tch = 0;
+		md->num_prv_rec = 0;
 	}
 }
 
-static void cyttsp4_get_touch_axis(struct cyttsp4_mt_data *md,
-	int *axis, int size, int max, u8 *xy_data, int bofs)
-{
-	int nbyte;
-	int next;
-
-	for (nbyte = 0, *axis = 0, next = 0; nbyte < size; nbyte++) {
-		dev_vdbg(&md->ttsp->dev,
-			"%s: *axis=%02X(%d) size=%d max=%08X xy_data=%p"
-			" xy_data[%d]=%02X(%d) bofs=%d\n",
-			__func__, *axis, *axis, size, max, xy_data, next,
-			xy_data[next], xy_data[next], bofs);
-		*axis = (*axis * 256) + (xy_data[next] >> bofs);
-		next++;
-	}
-
-	*axis &= max - 1;
-
-	dev_vdbg(&md->ttsp->dev,
-		"%s: *axis=%02X(%d) size=%d max=%08X xy_data=%p"
-		" xy_data[%d]=%02X(%d)\n",
-		__func__, *axis, *axis, size, max, xy_data, next,
-		xy_data[next], xy_data[next]);
-}
-
-static void cyttsp4_get_touch(struct cyttsp4_mt_data *md,
-	struct cyttsp4_touch *touch, u8 *xy_data)
+static void cyttsp4_mt_process_touch(struct cyttsp4_mt_data *md,
+	struct cyttsp4_touch *touch)
 {
 	struct device *dev = &md->ttsp->dev;
-	struct cyttsp4_sysinfo *si = md->si;
-	enum cyttsp4_tch_abs abs;
 	int tmp;
 	bool flipped;
 
-	for (abs = CY_TCH_X; abs < CY_TCH_NUM_ABS; abs++) {
-		cyttsp4_get_touch_axis(md, &touch->abs[abs],
-			si->si_ofs.tch_abs[abs].size,
-			si->si_ofs.tch_abs[abs].max,
-			xy_data + si->si_ofs.tch_abs[abs].ofs,
-			si->si_ofs.tch_abs[abs].bofs);
-		dev_vdbg(dev, "%s: get %s=%04X(%d)\n", __func__,
-			cyttsp4_tch_abs_string[abs],
-			touch->abs[abs], touch->abs[abs]);
-	}
-
-	if (md->pdata->flags & CY_FLAG_FLIP) {
+	if (md->pdata->flags & CY_MT_FLAG_FLIP) {
 		tmp = touch->abs[CY_TCH_X];
 		touch->abs[CY_TCH_X] = touch->abs[CY_TCH_Y];
 		touch->abs[CY_TCH_Y] = tmp;
@@ -102,7 +69,7 @@ static void cyttsp4_get_touch(struct cyttsp4_mt_data *md,
 	} else
 		flipped = false;
 
-	if (md->pdata->flags & CY_FLAG_INV_X) {
+	if (md->pdata->flags & CY_MT_FLAG_INV_X) {
 		if (flipped)
 			touch->abs[CY_TCH_X] = md->si->si_ofs.max_y -
 				touch->abs[CY_TCH_X];
@@ -110,7 +77,7 @@ static void cyttsp4_get_touch(struct cyttsp4_mt_data *md,
 			touch->abs[CY_TCH_X] = md->si->si_ofs.max_x -
 				touch->abs[CY_TCH_X];
 	}
-	if (md->pdata->flags & CY_FLAG_INV_Y) {
+	if (md->pdata->flags & CY_MT_FLAG_INV_Y) {
 		if (flipped)
 			touch->abs[CY_TCH_Y] = md->si->si_ofs.max_x -
 				touch->abs[CY_TCH_Y];
@@ -121,31 +88,35 @@ static void cyttsp4_get_touch(struct cyttsp4_mt_data *md,
 
 	dev_vdbg(dev, "%s: flip=%s inv-x=%s inv-y=%s x=%04X(%d) y=%04X(%d)\n",
 		__func__, flipped ? "true" : "false",
-		md->pdata->flags & CY_FLAG_INV_X ? "true" : "false",
-		md->pdata->flags & CY_FLAG_INV_Y ? "true" : "false",
+		md->pdata->flags & CY_MT_FLAG_INV_X ? "true" : "false",
+		md->pdata->flags & CY_MT_FLAG_INV_Y ? "true" : "false",
 		touch->abs[CY_TCH_X], touch->abs[CY_TCH_X],
 		touch->abs[CY_TCH_Y], touch->abs[CY_TCH_Y]);
 }
 
-static void cyttsp4_get_mt_touches(struct cyttsp4_mt_data *md, int num_cur_tch)
+static void cyttsp4_get_mt_touches(struct cyttsp4_mt_data *md, int num_cur_rec)
 {
 	struct device *dev = &md->ttsp->dev;
-	struct cyttsp4_core_platform_data *core_pdata =
-				dev_get_platdata(&md->ttsp->core->dev);
-
 	struct cyttsp4_sysinfo *si = md->si;
 	struct cyttsp4_touch tch;
 	int sig;
 	int i, j, t = 0;
-	int ids[max(CY_TMA1036_MAX_TCH + 1,
-		CY_TMA4XX_MAX_TCH + 1)]; /* add one for hover */
 	int mt_sync_count = 0;
+	int a; // no use
+	DECLARE_BITMAP(ids, max(CY_TMA1036_MAX_TCH, CY_TMA4XX_MAX_TCH));
 
-	memset(ids, 0, (si->si_ofs.max_tchs + 1) * sizeof(int));
-	memset(&tch, 0, sizeof(struct cyttsp4_touch));
-	for (i = 0; i < num_cur_tch; i++) {
-		cyttsp4_get_touch(md, &tch, si->xy_data +
-			(i * si->si_ofs.tch_rec_size));
+	bitmap_zero(ids, si->si_ofs.tch_abs[CY_TCH_T].max);
+
+	for (i = 0; i < num_cur_rec; i++) {
+		cyttsp4_get_touch_record(md->ttsp, i, tch.abs);
+
+		/* Discard proximity event */
+		if (tch.abs[CY_TCH_O] == CY_OBJ_PROXIMITY) {
+			dev_dbg(dev, "%s: Discarding proximity event\n",
+				__func__);
+			continue;
+		}
+
 		if ((tch.abs[CY_TCH_T] < md->pdata->frmwrk->abs
 			[(CY_ABS_ID_OST * CY_NUM_ABS_SET) + CY_MIN_OST]) ||
 			(tch.abs[CY_TCH_T] > md->pdata->frmwrk->abs
@@ -160,6 +131,9 @@ static void cyttsp4_get_mt_touches(struct cyttsp4_mt_data *md, int num_cur_tch)
 			continue;
 		}
 
+		/* Process touch */
+		cyttsp4_mt_process_touch(md, &tch);
+
 		/* use 0 based track id's */
 		sig = md->pdata->frmwrk->abs
 			[(CY_ABS_ID_OST * CY_NUM_ABS_SET) + 0];
@@ -167,31 +141,41 @@ static void cyttsp4_get_mt_touches(struct cyttsp4_mt_data *md, int num_cur_tch)
 			t = tch.abs[CY_TCH_T] - md->pdata->frmwrk->abs
 				[(CY_ABS_ID_OST * CY_NUM_ABS_SET) + CY_MIN_OST];
 			if (tch.abs[CY_TCH_E] == CY_EV_LIFTOFF) {
-				dev_dbg(dev, "%s: t=%d e=%d lift-off\n",
-					__func__, t, tch.abs[CY_TCH_E]);
+				if(md->ttsp->core->dbg_msg_level & 0x2)
+					dev_dbg(dev, "%s: t=%d e=%d lift-off\n",
+						__func__, t, tch.abs[CY_TCH_E]);
+				/* [Optical][Touch] Driver porting, 20130717, Add Start */
+				if (IS_TTSP_VER_GE(si, 2, 3)) {
+					if(md->ttsp->core->dbg_msg_level & 0x2) {
+						dev_dbg(dev,
+							"%s: t=%d x=%d y=%d z=%d M=%d m=%d o=%d e=%d\n",
+							__func__, t,
+							tch.abs[CY_TCH_X],
+							tch.abs[CY_TCH_Y],
+							tch.abs[CY_TCH_P],
+							tch.abs[CY_TCH_MAJ],
+							tch.abs[CY_TCH_MIN],
+							tch.abs[CY_TCH_OR],
+							tch.abs[CY_TCH_E]);
+					}
+				} else {
+					if(md->ttsp->core->dbg_msg_level & 0x2)
+						dev_dbg(dev,
+							"%s: t=%d x=%d y=%d z=%d e=%d\n",
+							__func__, t,
+							tch.abs[CY_TCH_X],
+							tch.abs[CY_TCH_Y],
+							tch.abs[CY_TCH_P],
+							tch.abs[CY_TCH_E]);
+				}
+				/* [Optical][Touch] Driver porting, 20130717, Add End */
+
 				goto cyttsp4_get_mt_touches_pr_tch;
 			}
 			if (md->mt_function.input_report)
-				md->mt_function.input_report(md->input, sig, t);
-			ids[t] = true;
-		}
-
-		if (core_pdata->use_configure_sensitivity) {
-			if (tch.abs[CY_TCH_O] == CY_OBJ_GLOVE) {
-				tch.abs[CY_TCH_P] += si->si_ofs.max_p + 1;
-				dev_dbg(dev, "%s: t=%d z=%d force zero\n",
-					__func__, t, tch.abs[CY_TCH_P]);
-			}
-		} else {
-			/* Check if hover on this touch */
-			dev_vdbg(dev, "%s: t=%d z=%d\n", __func__, t,
-				tch.abs[CY_TCH_P]);
-
-			if (t == CY_ACTIVE_STYLUS_ID) {
-				tch.abs[CY_TCH_P] = 0;
-				dev_dbg(dev, "%s: t=%d z=%d force zero\n",
-					__func__, t, tch.abs[CY_TCH_P]);
-			}
+				md->mt_function.input_report(md->input, sig,
+					t, tch.abs[CY_TCH_O]);
+			__set_bit(t, ids);
 		}
 
 		/* all devices: position and pressure fields */
@@ -202,8 +186,7 @@ static void cyttsp4_get_mt_touches(struct cyttsp4_mt_data *md, int num_cur_tch)
 				input_report_abs(md->input, sig,
 					tch.abs[CY_TCH_X + j]);
 		}
-
-		if (si->si_ofs.tch_rec_size > CY_TMA1036_TCH_REC_SIZE) {
+		if (IS_TTSP_VER_GE(si, 2, 3)) {
 			/*
 			 * TMA400 size and orientation fields:
 			 * if pressure is non-zero and major touch
@@ -227,8 +210,11 @@ static void cyttsp4_get_mt_touches(struct cyttsp4_mt_data *md, int num_cur_tch)
 			md->mt_function.input_sync(md->input);
 		mt_sync_count++;
 
+/* [Optical][Touch] Driver porting, 20130717, Del Start */
 cyttsp4_get_mt_touches_pr_tch:
-		if (si->si_ofs.tch_rec_size > CY_TMA1036_TCH_REC_SIZE)
+		a = 0;
+#if 0
+		if (IS_TTSP_VER_GE(si, 2, 3))
 			dev_dbg(dev,
 				"%s: t=%d x=%d y=%d z=%d M=%d m=%d o=%d e=%d\n",
 				__func__, t,
@@ -241,20 +227,21 @@ cyttsp4_get_mt_touches_pr_tch:
 				tch.abs[CY_TCH_E]);
 		else
 			dev_dbg(dev,
-				"%s: t=%d x=%d y=%d z=%d e=%d o=%d\n", __func__,
+				"%s: t=%d x=%d y=%d z=%d e=%d\n", __func__,
 				t,
 				tch.abs[CY_TCH_X],
 				tch.abs[CY_TCH_Y],
 				tch.abs[CY_TCH_P],
-				tch.abs[CY_TCH_E],
-				tch.abs[CY_TCH_O]);
+				tch.abs[CY_TCH_E]);
+#endif
+/* [Optical][Touch] Driver porting, 20130717, Del End*/
 	}
 
 	if (md->mt_function.final_sync)
-		md->mt_function.final_sync(md->input, si->si_ofs.max_tchs,
-				mt_sync_count, ids);
+		md->mt_function.final_sync(md->input,
+			si->si_ofs.tch_abs[CY_TCH_T].max, mt_sync_count, ids);
 
-	md->num_prv_tch = num_cur_tch;
+	md->num_prv_rec = num_cur_rec;
 	md->prv_tch_type = tch.abs[CY_TCH_O];
 
 	return;
@@ -265,8 +252,7 @@ static int cyttsp4_xy_worker(struct cyttsp4_mt_data *md)
 {
 	struct device *dev = &md->ttsp->dev;
 	struct cyttsp4_sysinfo *si = md->si;
-	u8 num_cur_tch;
-	u8 hst_mode;
+	u8 num_cur_rec;
 	u8 rep_len;
 	u8 rep_stat;
 	u8 tt_stat;
@@ -278,90 +264,44 @@ static int cyttsp4_xy_worker(struct cyttsp4_mt_data *md)
 	 * for all active touches.
 	 * Event data also includes button data
 	 */
-	/*
-	 * Use 2 reads:
-	 * 1st read to get mode + button bytes + touch count (core)
-	 * 2nd read (optional) to get touch 1 - touch n data
-	 */
-	hst_mode = si->xy_mode[CY_REG_BASE];
 	rep_len = si->xy_mode[si->si_ofs.rep_ofs];
 	rep_stat = si->xy_mode[si->si_ofs.rep_ofs + 1];
 	tt_stat = si->xy_mode[si->si_ofs.tt_stat_ofs];
-	dev_vdbg(dev, "%s: %s%02X %s%d %s%02X %s%02X\n", __func__,
-		"hst_mode=", hst_mode, "rep_len=", rep_len,
-		"rep_stat=", rep_stat, "tt_stat=", tt_stat);
 
-	num_cur_tch = GET_NUM_TOUCHES(tt_stat);
-	dev_vdbg(dev, "%s: num_cur_tch=%d\n", __func__, num_cur_tch);
+	num_cur_rec = GET_NUM_TOUCH_RECORDS(tt_stat);
 
-	if (rep_len == 0 && num_cur_tch > 0) {
+	if (rep_len == 0 && num_cur_rec > 0) {
 		dev_err(dev, "%s: report length error rep_len=%d num_tch=%d\n",
-			__func__, rep_len, num_cur_tch);
+			__func__, rep_len, num_cur_rec);
 		goto cyttsp4_xy_worker_exit;
 	}
 
-	/* read touches */
-	if (num_cur_tch > 0) {
-		rc = cyttsp4_read(md->ttsp, CY_MODE_OPERATIONAL,
-			si->si_ofs.tt_stat_ofs + 1, si->xy_data,
-			num_cur_tch * si->si_ofs.tch_rec_size);
-		if (rc < 0) {
-			dev_err(dev, "%s: read fail on touch regs r=%d\n",
-				__func__, rc);
-			goto cyttsp4_xy_worker_exit;
-		}
-	}
-
-	/* print xy data */
-	cyttsp4_pr_buf(dev, md->pr_buf, si->xy_data, num_cur_tch *
-		si->si_ofs.tch_rec_size, "xy_data");
-
-#ifdef SHOK_SENSOR_DATA_MODE
-	if (si->monitor.mntr_status == CY_MNTR_STARTED) {
-		int offset = (si->si_ofs.max_tchs * si->si_ofs.tch_rec_size)
-				+ (si->si_ofs.num_btns
-					* si->si_ofs.btn_rec_size)
-				+ (si->si_ofs.tt_stat_ofs + 1);
-		rc = cyttsp4_read(md->ttsp, CY_MODE_OPERATIONAL,
-				offset, &(si->monitor.sensor_data[0]), 150);
-		if (rc < 0) {
-			dev_err(dev, "%s: %s r=%d\n", __func__,
-					"read fail on sensor monitor regs",
-					rc);
-			goto cyttsp4_xy_worker_exit;
-		}
-		cyttsp4_pr_buf(dev, md->pr_buf, si->monitor.sensor_data,
-				150, "sensor_monitor");
-	}
-#endif
 	/* check any error conditions */
 	if (IS_BAD_PKT(rep_stat)) {
 		dev_dbg(dev, "%s: Invalid buffer detected\n", __func__);
 		rc = 0;
 		goto cyttsp4_xy_worker_exit;
-	} else if (IS_LARGE_AREA(tt_stat)) {
-		/* terminate all active tracks */
-		num_cur_tch = 0;
+	}
+
+	if (IS_LARGE_AREA(tt_stat)) {
 		dev_dbg(dev, "%s: Large area detected\n", __func__);
-	} else if (num_cur_tch > si->si_ofs.max_tchs) {
-		if (num_cur_tch > max(CY_TMA1036_MAX_TCH, CY_TMA4XX_MAX_TCH)) {
-			/* terminate all active tracks */
-			dev_err(dev, "%s: Num touch err detected (n=%d)\n",
-				__func__, num_cur_tch);
-			num_cur_tch = 0;
-		} else {
-			dev_err(dev, "%s: %s (n=%d c=%d)\n", __func__,
-				"too many tch; set to max tch",
-				num_cur_tch, si->si_ofs.max_tchs);
-			num_cur_tch = si->si_ofs.max_tchs;
-		}
+		/* Do not report touch if configured so */
+		if (md->pdata->flags & CY_MT_FLAG_NO_TOUCH_ON_LO)
+			num_cur_rec = 0;
+	}
+
+	if (num_cur_rec > si->si_ofs.max_tchs) {
+		dev_err(dev, "%s: %s (n=%d c=%d)\n", __func__,
+			"too many tch; set to max tch",
+			num_cur_rec, si->si_ofs.max_tchs);
+		num_cur_rec = si->si_ofs.max_tchs;
 	}
 
 	/* extract xy_data for all currently reported touches */
-	dev_vdbg(dev, "%s: extract data num_cur_tch=%d\n", __func__,
-		num_cur_tch);
-	if (num_cur_tch)
-		cyttsp4_get_mt_touches(md, num_cur_tch);
+	dev_vdbg(dev, "%s: extract data num_cur_rec=%d\n", __func__,
+		num_cur_rec);
+	if (num_cur_rec)
+		cyttsp4_get_mt_touches(md, num_cur_rec);
 	else
 		cyttsp4_lift_all(md);
 
@@ -370,6 +310,24 @@ static int cyttsp4_xy_worker(struct cyttsp4_mt_data *md)
 
 cyttsp4_xy_worker_exit:
 	return rc;
+}
+
+static void cyttsp4_mt_send_dummy_event(struct cyttsp4_mt_data *md)
+{
+	unsigned long ids = 0;
+
+	/* for easy wakeup */
+	if (md->mt_function.input_report)
+		md->mt_function.input_report(md->input, ABS_MT_TRACKING_ID,
+			0, CY_OBJ_STANDARD_FINGER);
+	if (md->mt_function.input_sync)
+		md->mt_function.input_sync(md->input);
+	if (md->mt_function.final_sync)
+		md->mt_function.final_sync(md->input, 0, 1, &ids);
+	if (md->mt_function.report_slot_liftoff)
+		md->mt_function.report_slot_liftoff(md, 1);
+	if (md->mt_function.final_sync)
+		md->mt_function.final_sync(md->input, 1, 1, &ids);
 }
 
 static int cyttsp4_mt_attention(struct cyttsp4_device *ttsp)
@@ -382,18 +340,27 @@ static int cyttsp4_mt_attention(struct cyttsp4_device *ttsp)
 
 	mutex_lock(&md->report_lock);
 	if (!md->is_suspended) {
-		/* core handles handshake */
-		rc = cyttsp4_xy_worker(md);
-	} else {
-		dev_vdbg(dev, "%s: Ignoring report while suspended\n",
-			__func__);
+		/**/
+		if(ttsp->core->enable_touch)
+			/* core handles handshake */
+			rc = cyttsp4_xy_worker(md);
+		/**/
 	}
 	mutex_unlock(&md->report_lock);
-
 	if (rc < 0)
 		dev_err(dev, "%s: xy_worker error r=%d\n", __func__, rc);
 
 	return rc;
+}
+
+static int cyttsp4_mt_wake_attention(struct cyttsp4_device *ttsp)
+{
+	struct cyttsp4_mt_data *md = dev_get_drvdata(&ttsp->dev);
+
+	mutex_lock(&md->report_lock);
+	cyttsp4_mt_send_dummy_event(md);
+	mutex_unlock(&md->report_lock);
+	return 0;
 }
 
 static int cyttsp4_startup_attention(struct cyttsp4_device *ttsp)
@@ -407,7 +374,6 @@ static int cyttsp4_startup_attention(struct cyttsp4_device *ttsp)
 	mutex_lock(&md->report_lock);
 	cyttsp4_lift_all(md);
 	mutex_unlock(&md->report_lock);
-
 	return rc;
 }
 
@@ -417,11 +383,10 @@ static int cyttsp4_mt_open(struct input_dev *input)
 	struct cyttsp4_device *ttsp =
 		container_of(dev, struct cyttsp4_device, dev);
 
-	dev_dbg(dev, "%s\n", __func__);
+	if(ttsp->core->dbg_msg_level & 0x2)
+		dev_dbg(dev, "%s\n", __func__);
 
-#ifndef CONFIG_FB
-	pm_runtime_get_sync(dev);
-#endif
+	pm_runtime_get(dev);
 
 	dev_vdbg(dev, "%s: setup subscriptions\n", __func__);
 
@@ -433,6 +398,10 @@ static int cyttsp4_mt_open(struct input_dev *input)
 	cyttsp4_subscribe_attention(ttsp, CY_ATTEN_STARTUP,
 		cyttsp4_startup_attention, 0);
 
+	/* set up wakeup call back */
+	cyttsp4_subscribe_attention(ttsp, CY_ATTEN_WAKE,
+		cyttsp4_mt_wake_attention, 0);
+
 	return 0;
 }
 
@@ -442,7 +411,8 @@ static void cyttsp4_mt_close(struct input_dev *input)
 	struct cyttsp4_device *ttsp =
 		container_of(dev, struct cyttsp4_device, dev);
 
-	dev_dbg(dev, "%s\n", __func__);
+	if(ttsp->core->dbg_msg_level & 0x2)
+		dev_dbg(dev, "%s\n", __func__);
 
 	cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_IRQ,
 		cyttsp4_mt_attention, CY_MODE_OPERATIONAL);
@@ -450,9 +420,10 @@ static void cyttsp4_mt_close(struct input_dev *input)
 	cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_STARTUP,
 		cyttsp4_startup_attention, 0);
 
-#ifndef CONFIG_FB
+	cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_WAKE,
+		cyttsp4_mt_wake_attention, 0);
+
 	pm_runtime_put(dev);
-#endif
 }
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
@@ -463,6 +434,13 @@ static void cyttsp4_mt_early_suspend(struct early_suspend *h)
 	struct device *dev = &md->ttsp->dev;
 
 	dev_dbg(dev, "%s\n", __func__);
+
+#ifndef CONFIG_PM_RUNTIME
+	mutex_lock(&md->report_lock);
+	md->is_suspended = true;
+	cyttsp4_lift_all(md);
+	mutex_unlock(&md->report_lock);
+#endif
 
 	pm_runtime_put(dev);
 }
@@ -475,10 +453,16 @@ static void cyttsp4_mt_late_resume(struct early_suspend *h)
 
 	dev_dbg(dev, "%s\n", __func__);
 
-	pm_runtime_get_sync(dev);
+#ifndef CONFIG_PM_RUNTIME
+	mutex_lock(&md->report_lock);
+	md->is_suspended = false;
+	mutex_unlock(&md->report_lock);
+#endif
+
+	pm_runtime_get(dev);
 }
 
-void cyttsp4_setup_early_suspend(struct cyttsp4_mt_data *md)
+static void cyttsp4_setup_early_suspend(struct cyttsp4_mt_data *md)
 {
 	md->es.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1;
 	md->es.suspend = cyttsp4_mt_early_suspend;
@@ -486,10 +470,76 @@ void cyttsp4_setup_early_suspend(struct cyttsp4_mt_data *md)
 
 	register_early_suspend(&md->es);
 }
+
+#elif CONFIG_FB
+static int fb_notifier_callback(struct notifier_block *self,
+				unsigned long event, void *data)
+{
+	struct fb_event *evdata = data;
+	int *blank;
+	struct cyttsp4_mt_data *md =
+		container_of(self, struct cyttsp4_mt_data, fb_notif);
+	struct device *dev = &md->ttsp->dev;
+
+    	dev_dbg(dev, "%s\n", __func__);
+
+	if (evdata && evdata->data && event == FB_EVENT_BLANK &&
+		md && md->ttsp) {
+		blank = evdata->data;
+		if (*blank == FB_BLANK_UNBLANK && md->is_suspended == true)
+			cyttsp4_mt_resume(&(md->ttsp->dev));
+		else if (*blank == FB_BLANK_POWERDOWN)
+			cyttsp4_mt_suspend(&(md->ttsp->dev));
+	}
+
+	return 0;
+}
+static void cyttsp4_setup_early_suspend(struct cyttsp4_mt_data *md)
+{
+	int retval = 0;
+	struct device *dev = &md->ttsp->dev;
+
+    	dev_dbg(dev, "%s\n", __func__);
+	md->fb_notif.notifier_call = fb_notifier_callback;
+
+	retval = fb_register_client(&md->fb_notif);
+	if (retval)
+		dev_err(&md->ttsp->dev,
+			"Unable to register fb_notifier: %d\n", retval);
+	return;
+}
+
+#else
+
+static void cyttsp4_setup_early_suspend(struct cyttsp4_mt_data *md)
+{
+	return;
+}
+
 #endif
 
 #if defined(CONFIG_PM_SLEEP) || defined(CONFIG_PM_RUNTIME)
 static int cyttsp4_mt_suspend(struct device *dev)
+{
+//#ifndef CONFIG_PM_RUNTIME
+	struct cyttsp4_mt_data *md = dev_get_drvdata(dev);
+//#endif
+
+	dev_dbg(dev, "%s\n", __func__);
+
+//#ifndef CONFIG_PM_RUNTIME
+	mutex_lock(&md->report_lock);
+	md->is_suspended = true;
+	cyttsp4_lift_all(md);
+	mutex_unlock(&md->report_lock);
+//#endif
+
+	cyttsp4_core_early_suspend();
+//	pm_runtime_put(dev);
+	return 0;
+}
+
+static int cyttsp4_mt_rt_suspend(struct device *dev)
 {
 	struct cyttsp4_mt_data *md = dev_get_drvdata(dev);
 
@@ -503,10 +553,12 @@ static int cyttsp4_mt_suspend(struct device *dev)
 	return 0;
 }
 
-static int cyttsp4_mt_resume(struct device *dev)
+static int cyttsp4_mt_rt_resume(struct device *dev)
 {
 	struct cyttsp4_mt_data *md = dev_get_drvdata(dev);
-	dev_dbg(dev, "%s\n", __func__);
+
+	if(md->ttsp->core->dbg_msg_level & 0x4)
+		dev_dbg(dev, "%s\n", __func__);
 
 	mutex_lock(&md->report_lock);
 	md->is_suspended = false;
@@ -514,67 +566,144 @@ static int cyttsp4_mt_resume(struct device *dev)
 
 	return 0;
 }
-#endif
 
-const struct dev_pm_ops cyttsp4_mt_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(cyttsp4_mt_suspend, cyttsp4_mt_resume)
-	SET_RUNTIME_PM_OPS(cyttsp4_mt_suspend, cyttsp4_mt_resume, NULL)
-};
-
-
-#ifdef CONFIG_FB
-static void cyttsp4_mt_notify_resume(struct work_struct *work)
+static int cyttsp4_mt_resume(struct device *dev)
 {
-	struct cyttsp4_mt_data *md = container_of(work,
-			struct cyttsp4_mt_data, notify_resume);
-	struct device *dev = &md->ttsp->dev;
-	dev_dbg(dev, "%s: usage_count=%d\n", __func__,
-		atomic_read(&dev->power.usage_count));
+/**/
+	struct cyttsp4_mt_data *md = dev_get_drvdata(dev);
 
-	pm_runtime_get_sync(dev);
-}
+	if(md->ttsp->core->dbg_msg_level & 0x4)
+		dev_dbg(dev, "%s\n", __func__);
 
-static void cyttsp4_mt_notify_suspend(struct work_struct *work)
-{
-	struct cyttsp4_mt_data *md = container_of(work,
-			struct cyttsp4_mt_data, notify_suspend);
-	struct device *dev = &md->ttsp->dev;
-	dev_dbg(dev, "%s: usage_count=%d\n", __func__,
-		atomic_read(&dev->power.usage_count));
+	mutex_lock(&md->report_lock);
+	md->is_suspended = false;
+	mutex_unlock(&md->report_lock);
 
-	pm_runtime_put(dev);
-}
-
-static int cyttsp4_fb_notifier_callback(struct notifier_block *self,
-				unsigned long event, void *data)
-{
-	struct fb_event *evdata = data;
-	int *blank;
-	struct cyttsp4_mt_data *md =
-		container_of(self, struct cyttsp4_mt_data, fb_notif);
-	static bool is_unblank;
-
-	if (evdata && evdata->data && event == FB_EVENT_BLANK && md &&
-			md->ttsp) {
-		blank = evdata->data;
-		if ((*blank == FB_BLANK_UNBLANK)  && (!is_unblank)) {
-			is_unblank = true;
-			cancel_work_sync(&md->notify_suspend);
-			cancel_work_sync(&md->notify_resume);
-			schedule_work(&md->notify_resume);
-		} else if ((*blank == FB_BLANK_POWERDOWN)  && (is_unblank)) {
-			is_unblank = false;
-			cancel_work_sync(&md->notify_resume);
-			cancel_work_sync(&md->notify_suspend);
-			schedule_work(&md->notify_suspend);
-		}
-	}
-
+	cyttsp4_core_lately_resume();
+//	pm_runtime_get(dev);
+/**/
 	return 0;
 }
 #endif
 
-int cyttsp4_mt_release(struct cyttsp4_device *ttsp)
+#if 0
+static const struct dev_pm_ops cyttsp4_mt_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(cyttsp4_mt_suspend, cyttsp4_mt_resume)
+	SET_RUNTIME_PM_OPS(cyttsp4_mt_suspend, cyttsp4_mt_rt_resume, NULL)
+};
+#endif
+
+#if (!defined(CONFIG_FB) && !defined(CONFIG_HAS_EARLYSUSPEND))
+static const struct dev_pm_ops cyttsp4_mt_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(cyttsp4_mt_suspend, cyttsp4_mt_resume)
+};
+#else
+static const struct dev_pm_ops cyttsp4_mt_pm_ops = {
+	SET_RUNTIME_PM_OPS(cyttsp4_mt_rt_suspend, cyttsp4_mt_rt_resume, NULL)
+};
+#endif
+
+static int cyttsp4_setup_input_device(struct cyttsp4_device *ttsp)
+{
+	struct device *dev = &ttsp->dev;
+	struct cyttsp4_mt_data *md = dev_get_drvdata(dev);
+	int signal = CY_IGNORE_VALUE;
+	int max_x, max_y, max_p, min, max;
+	int max_x_tmp, max_y_tmp;
+	int i;
+	int rc;
+
+	dev_vdbg(dev, "%s: Initialize event signals\n", __func__);
+	__set_bit(EV_ABS, md->input->evbit);
+	__set_bit(EV_REL, md->input->evbit);
+	__set_bit(EV_KEY, md->input->evbit);
+#ifdef INPUT_PROP_DIRECT
+	__set_bit(INPUT_PROP_DIRECT, md->input->propbit);
+#endif
+
+	/* If virtualkeys enabled, don't use all screen */
+	if (md->pdata->flags & CY_MT_FLAG_VKEYS) {
+		max_x_tmp = md->pdata->vkeys_x;
+		max_y_tmp = md->pdata->vkeys_y;
+	} else {
+		max_x_tmp = md->si->si_ofs.max_x;
+		max_y_tmp = md->si->si_ofs.max_y;
+	}
+
+	/* get maximum values from the sysinfo data */
+	if (md->pdata->flags & CY_MT_FLAG_FLIP) {
+		max_x = max_y_tmp - 1;
+		max_y = max_x_tmp - 1;
+	} else {
+		max_x = max_x_tmp - 1;
+		max_y = max_y_tmp - 1;
+	}
+	max_p = md->si->si_ofs.max_p;
+
+	/* set event signal capabilities */
+	for (i = 0; i < (md->pdata->frmwrk->size / CY_NUM_ABS_SET); i++) {
+		signal = md->pdata->frmwrk->abs
+			[(i * CY_NUM_ABS_SET) + CY_SIGNAL_OST];
+		if (signal != CY_IGNORE_VALUE) {
+			__set_bit(signal, md->input->absbit);
+			min = md->pdata->frmwrk->abs
+				[(i * CY_NUM_ABS_SET) + CY_MIN_OST];
+			max = md->pdata->frmwrk->abs
+				[(i * CY_NUM_ABS_SET) + CY_MAX_OST];
+			if (i == CY_ABS_ID_OST) {
+				/* shift track ids down to start at 0 */
+				max = max - min;
+				min = min - min;
+			} else if (i == CY_ABS_X_OST)
+				max = max_x;
+			else if (i == CY_ABS_Y_OST)
+				max = max_y;
+			else if (i == CY_ABS_P_OST)
+				max = max_p;
+			input_set_abs_params(md->input, signal, min, max,
+				md->pdata->frmwrk->abs
+				[(i * CY_NUM_ABS_SET) + CY_FUZZ_OST],
+				md->pdata->frmwrk->abs
+				[(i * CY_NUM_ABS_SET) + CY_FLAT_OST]);
+//			dev_dbg(dev, "%s: register signal=%02X min=%d max=%d\n",
+//				__func__, signal, min, max);
+			if (i == CY_ABS_ID_OST && !IS_TTSP_VER_GE(md->si, 2, 3))
+				break;
+		}
+	}
+
+	rc = md->mt_function.input_register_device(md->input,
+			md->si->si_ofs.tch_abs[CY_TCH_T].max);
+	if (rc < 0)
+		dev_err(dev, "%s: Error, failed register input device r=%d\n",
+			__func__, rc);
+	else
+		md->input_device_registered = true;
+
+	return rc;
+}
+
+static int cyttsp4_setup_input_attention(struct cyttsp4_device *ttsp)
+{
+	struct device *dev = &ttsp->dev;
+	struct cyttsp4_mt_data *md = dev_get_drvdata(dev);
+	int rc = 0;
+
+	dev_vdbg(dev, "%s\n", __func__);
+
+	md->si = cyttsp4_request_sysinfo(ttsp);
+	if (!md->si)
+		return -EINVAL;
+
+	rc = cyttsp4_setup_input_device(ttsp);
+
+	cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_STARTUP,
+		cyttsp4_setup_input_attention, 0);
+
+	return rc;
+}
+
+static int cyttsp4_mt_release(struct cyttsp4_device *ttsp)
 {
 	struct device *dev = &ttsp->dev;
 	struct cyttsp4_mt_data *md = dev_get_drvdata(dev);
@@ -582,15 +711,23 @@ int cyttsp4_mt_release(struct cyttsp4_device *ttsp)
 	dev_dbg(dev, "%s\n", __func__);
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
+	/*
+	 * This check is to prevent pm_runtime usage_count drop below zero
+	 * because of removing the module while in suspended state
+	 */
+	if (md->is_suspended)
+		pm_runtime_get_noresume(dev);
+
 	unregister_early_suspend(&md->es);
 #endif
-#ifdef CONFIG_FB
-	fb_unregister_client(&md->fb_notif);
-	cancel_work_sync(&md->notify_resume);
-	cancel_work_sync(&md->notify_suspend);
-#endif
 
-	input_unregister_device(md->input);
+	if (md->input_device_registered) {
+		input_unregister_device(md->input);
+	} else {
+		input_free_device(md->input);
+		cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_STARTUP,
+			cyttsp4_setup_input_attention, 0);
+	}
 
 	pm_runtime_suspend(dev);
 	pm_runtime_disable(dev);
@@ -605,15 +742,17 @@ static int cyttsp4_mt_probe(struct cyttsp4_device *ttsp)
 	struct device *dev = &ttsp->dev;
 	struct cyttsp4_mt_data *md;
 	struct cyttsp4_mt_platform_data *pdata = dev_get_platdata(dev);
-	int signal = CY_IGNORE_VALUE;
-	int max_x, max_y, max_p, min, max;
-	int max_x_tmp, max_y_tmp;
-	int i;
-	int rc;
+	int rc = 0;
 
-	dev_info(dev, "%s\n", __func__);
-	dev_dbg(dev, "%s: debug on\n", __func__);
+//	dev_info(dev, "%s\n", __func__);
+//	dev_dbg(dev, "%s: debug on\n", __func__);
 	dev_vdbg(dev, "%s: verbose debug on\n", __func__);
+
+	if (pdata == NULL) {
+		dev_err(dev, "%s: Missing platform data\n", __func__);
+		rc = -ENODEV;
+		goto error_no_pdata;
+	}
 
 	md = kzalloc(sizeof(*md), GFP_KERNEL);
 	if (md == NULL) {
@@ -625,7 +764,6 @@ static int cyttsp4_mt_probe(struct cyttsp4_device *ttsp)
 	cyttsp4_init_function_ptrs(md);
 
 	mutex_init(&md->report_lock);
-
 	md->prv_tch_type = CY_OBJ_STANDARD_FINGER;
 	md->ttsp = ttsp;
 	md->pdata = pdata;
@@ -651,110 +789,35 @@ static int cyttsp4_mt_probe(struct cyttsp4_device *ttsp)
 
 	pm_runtime_enable(dev);
 
-	pm_runtime_get_sync(dev);
 	/* get sysinfo */
 	md->si = cyttsp4_request_sysinfo(ttsp);
-	pm_runtime_put(dev);
-
-	if (md->si == NULL) {
+	if (md->si) {
+		rc = cyttsp4_setup_input_device(ttsp);
+		if (rc)
+			goto error_init_input;
+	} else {
 		dev_err(dev, "%s: Fail get sysinfo pointer from core p=%p\n",
 			__func__, md->si);
-		rc = -ENODEV;
-		goto error_get_sysinfo;
+		cyttsp4_subscribe_attention(ttsp, CY_ATTEN_STARTUP,
+			cyttsp4_setup_input_attention, 0);
 	}
 
-	dev_vdbg(dev, "%s: Initialize event signals\n", __func__);
-	__set_bit(EV_ABS, md->input->evbit);
-	__set_bit(EV_REL, md->input->evbit);
-	__set_bit(EV_KEY, md->input->evbit);
-	bitmap_fill(md->input->absbit, ABS_MAX);
-
-	/* If virtualkeys enabled, don't use all screen */
-	if (md->pdata->flags & CY_FLAG_VKEYS) {
-		max_x_tmp = CY_VKEYS_X;
-		max_y_tmp = CY_VKEYS_Y;
-	} else {
-		max_x_tmp = md->si->si_ofs.max_x;
-		max_y_tmp = md->si->si_ofs.max_y;
-	}
-
-	/* get maximum values from the sysinfo data */
-	if (md->pdata->flags & CY_FLAG_FLIP) {
-		max_x = max_y_tmp - 1;
-		max_y = max_x_tmp - 1;
-	} else {
-		max_x = max_x_tmp - 1;
-		max_y = max_y_tmp - 1;
-	}
-	max_p = md->si->si_ofs.max_p;
-
-	/* set event signal capabilities */
-	for (i = 0; i < (md->pdata->frmwrk->size / CY_NUM_ABS_SET); i++) {
-		signal = md->pdata->frmwrk->abs
-			[(i * CY_NUM_ABS_SET) + CY_SIGNAL_OST];
-		if (signal != CY_IGNORE_VALUE) {
-			min = md->pdata->frmwrk->abs
-				[(i * CY_NUM_ABS_SET) + CY_MIN_OST];
-			max = md->pdata->frmwrk->abs
-				[(i * CY_NUM_ABS_SET) + CY_MAX_OST];
-			if (i == CY_ABS_ID_OST) {
-				/* shift track ids down to start at 0 */
-				max = max - min;
-				min = min - min;
-			} else if (i == CY_ABS_X_OST)
-				max = max_x;
-			else if (i == CY_ABS_Y_OST)
-				max = max_y;
-			else if (i == CY_ABS_P_OST)
-				max = max_p;
-			input_set_abs_params(md->input, signal, min, max,
-				md->pdata->frmwrk->abs
-				[(i * CY_NUM_ABS_SET) + CY_FUZZ_OST],
-				md->pdata->frmwrk->abs
-				[(i * CY_NUM_ABS_SET) + CY_FLAT_OST]);
-			dev_dbg(dev, "%s: register signal=%02X min=%d max=%d\n",
-				__func__, signal, min, max);
-			if ((i == CY_ABS_ID_OST) &&
-				(md->si->si_ofs.tch_rec_size <
-				CY_TMA4XX_TCH_REC_SIZE))
-				break;
-		}
-	}
-
-	rc = md->mt_function.input_register_device(md->input,
-			md->si->si_ofs.max_tchs);
-	if (rc < 0) {
-		dev_err(dev, "%s: Error, failed register input device r=%d\n",
-			__func__, rc);
-		goto error_init_input;
-	}
-
-#ifdef CONFIG_HAS_EARLYSUSPEND
+//#ifdef CONFIG_HAS_EARLYSUSPEND
 	cyttsp4_setup_early_suspend(md);
-#endif
-#ifdef CONFIG_FB
-	md->fb_notif.notifier_call = cyttsp4_fb_notifier_callback;
-	rc = fb_register_client(&md->fb_notif);
-	if (rc) {
-		dev_err(dev, "%s: Unable to register fb_notifier r=%d\n",
-				__func__, rc);
-	} else {
-		INIT_WORK(&md->notify_resume, cyttsp4_mt_notify_resume);
-		INIT_WORK(&md->notify_suspend, cyttsp4_mt_notify_suspend);
-	}
-#endif
+//#endif
+
 	dev_dbg(dev, "%s: OK\n", __func__);
 	return 0;
 
 error_init_input:
-	input_free_device(md->input);
-error_get_sysinfo:
 	pm_runtime_suspend(dev);
 	pm_runtime_disable(dev);
-	input_set_drvdata(md->input, NULL);
+	input_free_device(md->input);
 error_alloc_failed:
+	dev_set_drvdata(dev, NULL);
 	kfree(md);
 error_alloc_data_failed:
+error_no_pdata:
 	dev_err(dev, "%s failed.\n", __func__);
 	return rc;
 }
