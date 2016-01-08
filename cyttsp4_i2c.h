@@ -8,6 +8,7 @@
  *
  * Copyright (C) 2012 Cypress Semiconductor
  * Copyright (C) 2011 Sony Ericsson Mobile Communications AB.
+ * Copyright (C) 2014 Sony Mobile Communications AB.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,6 +26,8 @@
  *
  * Contact Cypress Semiconductor at www.cypress.com <ttdrivers@cypress.com>
  *
+ * NOTE: This file has been modified by Sony Mobile Communications AB.
+ * Modifications are licensed under the License.
  */
 
 #ifndef _LINUX_CYTTSP4_I2C_H

@@ -27,7 +27,6 @@
  *
  */
 
-#include <asm/unaligned.h>
 #include <linux/delay.h>
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
@@ -41,22 +40,28 @@
 #define CYTTSP4_LOADER_NAME "cyttsp4_loader"
 #define CYTTSP4_AUTO_LOAD_FOR_CORRUPTED_FW 1
 
-#define CYTTSP4_FW_UPGRADE \
-	(defined(CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_FW_UPGRADE) \
-	|| defined(CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE))
+enum cyttsp4_fw_proj {
+	CYTTSP4_FW_PROJ_HUASHAN = 1,
+	CYTTSP4_FW_PROJ_TIANCHI = 2,
+	CYTTSP4_FW_PROJ_WUKONG = 3,
+};
 
-#define CYTTSP4_TTCONFIG_UPGRADE \
-	(defined(CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_TTCONFIG_UPGRADE) \
-	|| defined(CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_MANUAL_TTCONFIG_UPGRADE))
-
-/* Timeout values in ms. */
+static const u8 cyttsp4_security_key[] = {
+	0xA5, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD, 0x5A
+};
+#define CY_MAX_NUM_CORE_DEVS				5
+#define CY_CMD_I2C_ADDR					0
+	/* Timeout value in ms. */
 #define CY_CMD_TIMEOUT					500
+	/* Timeout in ms. */
 #define CY_CMD_LDR_INIT_TIMEOUT				10000
-#define CY_LDR_REQUEST_EXCLUSIVE_TIMEOUT		5000
-
+#define CY_STATUS_SIZE_BYTE				1
+#define CY_STATUS_TYP_DELAY				2
+#define CY_CMD_TAIL_LEN					3
 #define CY_CMD_BYTE					1
 #define CY_STATUS_BYTE					1
 #define CY_MAX_STATUS_SIZE				32
+#define CY_MIN_STATUS_SIZE				5
 #define CY_START_OF_PACKET				0x01
 #define CY_END_OF_PACKET				0x17
 #define CY_DATA_ROW_SIZE				288
@@ -65,10 +70,13 @@
 #define CY_MAX_PACKET_LEN				512
 #define CY_COMM_BUSY					0xFF
 #define CY_CMD_BUSY					0xFE
+#define CY_SEPARATOR_OFFSET				0
 #define CY_ARRAY_ID_OFFSET				0
 #define CY_ROW_NUM_OFFSET				1
 #define CY_ROW_SIZE_OFFSET				3
 #define CY_ROW_DATA_OFFSET				5
+#define CY_FILE_SILICON_ID_OFFSET			0
+#define CY_FILE_REV_ID_OFFSET				4
 #define CY_CMD_LDR_HOST_SYNC				0xFF /* tma400 */
 #define CY_CMD_LDR_EXIT					0x3B
 #define CY_CMD_LDR_EXIT_CMD_SIZE			7
@@ -100,19 +108,6 @@ struct cyttsp4_loader_data {
 	struct cyttsp4_sysinfo *si;
 	u8 status_buf[CY_MAX_STATUS_SIZE];
 	struct completion int_running;
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE
-	struct completion builtin_bin_fw_complete;
-	int builtin_bin_fw_status;
-#endif
-	struct work_struct fw_and_config_upgrade;
-	struct work_struct calibration_work;
-	struct cyttsp4_loader_platform_data *loader_pdata;
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_MANUAL_TTCONFIG_UPGRADE
-	struct mutex config_lock;
-	u8 *config_data;
-	int config_size;
-	bool config_loading;
-#endif
 };
 
 struct cyttsp4_dev_id {
@@ -141,133 +136,6 @@ enum ldr_status {
 	ERROR_INVALID
 };
 
-#if CYTTSP4_FW_UPGRADE || CYTTSP4_TTCONFIG_UPGRADE
-
-extern int silicon_id;
-
-/* [Optical][Touch] Implement FW upgrade, 20130808, Add Start */
-static int cyttsp4_check_upgrade(struct cyttsp4_device *ttsp)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	struct cyttsp4_touch_config *ttconfig;
-	u16 cfg_ver_new, cfg_ver_old;
-	u8 cfg_ver_new_h, cfg_ver_new_l, cfg_ver_old_h, cfg_ver_old_l;
-	int rc = -ENOSYS;
-
-	if (data->loader_pdata == NULL) {
-		dev_info(dev, "%s: No loader platform data\n", __func__);
-		return rc;
-	}
-
-	ttconfig = data->loader_pdata->ttconfig;
-	if (ttconfig == NULL) {
-		dev_info(dev, "%s: No ttconfig data\n", __func__);
-		return rc;
-	}
-
-	if (ttconfig->param_regs == NULL) {
-		dev_info(dev, "%s: No touch parameters\n", __func__);
-		return rc;
-	}
-
-	if (ttconfig->param_regs->data == NULL || ttconfig->param_regs->size == 0) {
-		dev_info(dev, "%s: Invalid touch parameters\n", __func__);
-		return rc;
-	}
-
-	if (ttconfig->fw_ver == NULL || ttconfig->fw_vsize == 0) {
-		dev_info(dev, "%s: Invalid FW version for touch parameters\n",
-			__func__);
-		return rc;
-	}
-
-	if (ttconfig->param_regs->size < CY_TTCONFIG_VERSION_OFFSET + CY_TTCONFIG_VERSION_SIZE)
-		return -EINVAL;
-
-	cfg_ver_new = get_unaligned_le16(&ttconfig->param_regs->data[CY_TTCONFIG_VERSION_OFFSET]);
-
-	cfg_ver_new_h = cfg_ver_new >> 8 ;
-	cfg_ver_new_l = cfg_ver_new & 0xFF;
-
-	cfg_ver_old = data->si->ttconfig.version;
-	cfg_ver_old_h = cfg_ver_old >> 8;
-	cfg_ver_old_l = cfg_ver_old & 0xFF;
-	printk("[TP] cfg_ver_new_h = 0x%x, cfg_ver_new_l = 0x%x, cfg_ver_old_h = 0x%x, cfg_ver_old_l = 0x%x\n",
-			cfg_ver_new_h, cfg_ver_new_l, cfg_ver_old_h, cfg_ver_old_l);
-
-	if(silicon_id == IC_445)
-	{
-	//	if(cfg_ver_new_l > cfg_ver_old_l)	// for test
-		if( (cfg_ver_new_h > cfg_ver_old_h) && (cfg_ver_new_l==0x0) )	// for formal release
-		{
-			printk("[TP] Need to upgrade FW.\n");
-			return 1;
-		}
-	}
-
-	printk("[TP] Do not need to upgrade FW.\n");
-	return 0;
-}
-/* [Optical][Touch] Implement FW upgrade, 20130808, Add End*/
-
-/*
- * return code:
- * -1: Firmware version compared is older
- *  0: Firmware version compared is identical
- *  1: Firmware version compared is newer
- */
-static int cyttsp4_check_firmware_version(struct cyttsp4_device *ttsp,
-		u32 fw_ver_new, u32 fw_revctrl_new_h, u32 fw_revctrl_new_l)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	u32 fw_ver_img;
-	u32 fw_revctrl_img_h;
-	u32 fw_revctrl_img_l;
-
-	fw_ver_img = data->si->si_ptrs.cydata->fw_ver_major << 8;
-	fw_ver_img += data->si->si_ptrs.cydata->fw_ver_minor;
-
-	dev_dbg(dev, "%s: img vers:0x%04X new vers:0x%04X\n", __func__,
-			fw_ver_img, fw_ver_new);
-
-	if (fw_ver_new > fw_ver_img)
-		return 1;
-
-	if (fw_ver_new < fw_ver_img)
-		return -1;
-
-	fw_revctrl_img_h = be32_to_cpu(
-		*(u32 *)(data->si->si_ptrs.cydata->revctrl + 0));
-
-	dev_dbg(dev, "%s: img revctrl_h:0x%04X new revctrl_h:0x%04X\n",
-			__func__, fw_revctrl_img_h, fw_revctrl_new_h);
-
-	if (fw_revctrl_new_h > fw_revctrl_img_h)
-		return 1;
-
-	if (fw_revctrl_new_h < fw_revctrl_img_h)
-		return -1;
-
-	fw_revctrl_img_l = be32_to_cpu(
-		*(u32 *)(data->si->si_ptrs.cydata->revctrl + 4));
-
-	dev_dbg(dev, "%s: img revctrl_l:0x%04X new revctrl_l:0x%04X\n",
-			__func__, fw_revctrl_img_l, fw_revctrl_new_l);
-
-	if (fw_revctrl_new_l > fw_revctrl_img_l)
-		return 1;
-
-	if (fw_revctrl_new_l < fw_revctrl_img_l)
-		return -1;
-
-	return 0;
-}
-#endif /* CYTTSP4_FW_UPGRADE || CYTTSP4_TTCONFIG_UPGRADE */
-
-
-#if CYTTSP4_FW_UPGRADE
 static u16 _cyttsp4_compute_crc(struct cyttsp4_device *ttsp, u8 *buf, int size)
 {
 	u16 crc = 0xffff;
@@ -325,20 +193,14 @@ static int _cyttsp4_get_status(struct cyttsp4_device *ttsp,
 			&data->int_running, msecs_to_jiffies(timeout_ms));
 
 		/* TODO: Reconsider purpose of having retries here */
-		/* [OPT] Cypress AE solve upgrade failed, 20130918, Mod Start */
-//		for (tries = 0; tries < 2; tries++) {
-		for (tries = 0; tries < 5; tries++) {
-		/* [OPT] Cypress AE solve upgrade failed, 20130918, Mod End */
+		for (tries = 0; tries < 2; tries++) {
 			retval = cyttsp4_read(ttsp, CY_MODE_BOOTLOADER,
 					      CY_REG_BASE, buf, size);
 			/*
 			 * retry if bus read error or
 			 * status byte shows not ready
 			 */
-			/* [OPT] Cypress AE solve upgrade failed, 20130918, MOd Start */
-//			if (buf[1] == CY_COMM_BUSY || buf[1] == CY_CMD_BUSY)
-			if ((retval < 0) || buf[1] == CY_COMM_BUSY || buf[1] == CY_CMD_BUSY || (buf[0] != CY_START_OF_PACKET))
-			/* [OPT] Cypress AE solve upgrade failed, 20130918, Mod End */
+			if (buf[1] == CY_COMM_BUSY || buf[1] == CY_CMD_BUSY)
 				msleep(20); /* TODO: Constant if code kept */
 			else
 				break;
@@ -490,12 +352,8 @@ static int _cyttsp4_ldr_init(struct cyttsp4_device *ttsp)
 	u16 crc;
 	int i = 0;
 	int retval = 0;
-	const u8 *cyttsp4_security_key;
-	int key_size;
 	/* +1 for TMA400 host sync byte */
 	u8 ldr_init_cmd[CY_CMD_LDR_INIT_CMD_SIZE+1];
-
-	cyttsp4_security_key = cyttsp4_get_security_key(ttsp, &key_size);
 
 	ldr_init_cmd[i++] = CY_CMD_LDR_HOST_SYNC;
 	ldr_init_cmd[i++] = CY_START_OF_PACKET;
@@ -503,8 +361,8 @@ static int _cyttsp4_ldr_init(struct cyttsp4_device *ttsp)
 	ldr_init_cmd[i++] = 0x08;	/* data len lsb */
 	ldr_init_cmd[i++] = 0x00;	/* data len msb */
 	memcpy(&ldr_init_cmd[i], cyttsp4_security_key,
-			key_size);
-	i += key_size;
+		sizeof(cyttsp4_security_key));
+	i += sizeof(cyttsp4_security_key);
 	crc = _cyttsp4_compute_crc(ttsp, &ldr_init_cmd[1], i - 1);
 	ldr_init_cmd[i++] = (u8)crc;
 	ldr_init_cmd[i++] = (u8)(crc >> 8);
@@ -599,7 +457,7 @@ static int _cyttsp4_ldr_prog_row(struct cyttsp4_device *ttsp,
 
 		if (retval < 0) {
 			dev_err(&ttsp->dev,
-				"%s: prog row=%d fail r=%d\n",
+			"%s: prog row=%d fail r=%d\n",
 				__func__, row_image->row_num, retval);
 			goto cyttsp4_ldr_prog_row_exit;
 		}
@@ -775,8 +633,8 @@ static int _cyttsp4_load_app(struct cyttsp4_device *ttsp, const u8 *fw,
 		goto _cyttsp4_load_app_exit;
 	}
 
-	dev_info(dev, "%s: Send BL Loader Enter\n", __func__);
-
+	dev_info(dev,
+			"%s: Send BL Loader Enter\n", __func__);
 	retval = _cyttsp4_ldr_enter(ttsp, dev_id);
 	if (retval < 0) {
 		dev_err(dev,
@@ -799,12 +657,12 @@ static int _cyttsp4_load_app(struct cyttsp4_device *ttsp, const u8 *fw,
 		goto _cyttsp4_load_app_exit;
 	}
 
-	dev_info(dev, "%s: Send BL Loader Blocks\n", __func__);
-
+	dev_info(dev,
+			"%s: Send BL Loader Blocks\n", __func__);
 	while (p < (fw + fw_size)) {
 		/* Get row */
-//		dev_dbg(dev,
-//			"%s: read row=%d\n", __func__, ++row_count);
+		dev_dbg(dev,
+			"%s: read row=%d\n", __func__, ++row_count);
 		memset(row_buf, 0, row_buf_size);
 		p = _cyttsp4_get_row(ttsp, row_buf, p, image_rec_size);
 
@@ -894,244 +752,36 @@ _cyttsp4_load_app_exit:
 	return retval;
 }
 
-static void cyttsp4_fw_calibrate(struct work_struct *calibration_work)
+static int _start_fw_class(struct cyttsp4_device *ttsp,
+		void (*cont) (const struct firmware *fw, void *context))
 {
-	struct cyttsp4_loader_data *data = container_of(calibration_work,
-			struct cyttsp4_loader_data, calibration_work);
-	struct cyttsp4_device *ttsp = data->ttsp;
-	struct device *dev = &ttsp->dev;
-	u8 cmd_buf[CY_CMD_CAT_CALIBRATE_IDAC_CMD_SZ];
-	u8 return_buf[CY_CMD_CAT_CALIBRATE_IDAC_RET_SZ];
-	int rc;
+	int retval;
 
-	dev_vdbg(dev, "%s\n", __func__);
+	dev_vdbg(&ttsp->dev,
+		"%s: Enabling firmware class loader\n", __func__);
 
-	pm_runtime_get_sync(dev);
+	retval = request_firmware_nowait(THIS_MODULE,
+		FW_ACTION_NOHOTPLUG, "", &ttsp->dev,
+		GFP_KERNEL, ttsp, cont);
 
-	dev_vdbg(dev, "%s: Requesting exclusive\n", __func__);
-	rc = cyttsp4_request_exclusive(ttsp, CY_LDR_REQUEST_EXCLUSIVE_TIMEOUT);
-	if (rc < 0) {
-		dev_err(dev, "%s: Error on request exclusive r=%d\n",
-				__func__, rc);
-		goto exit;
-	}
-
-	dev_vdbg(dev, "%s: Requesting mode change to CAT\n", __func__);
-	rc = cyttsp4_request_set_mode(ttsp, CY_MODE_CAT);
-	if (rc < 0) {
-		dev_err(dev, "%s: Error on request set mode r=%d\n",
-				__func__, rc);
-		goto exit_release;
-	}
-
-	cmd_buf[0] = CY_CMD_CAT_CALIBRATE_IDACS;
-	cmd_buf[1] = 0x00; /* Mutual Capacitance Screen */
-	rc = cyttsp4_request_exec_cmd(ttsp, CY_MODE_CAT,
-			cmd_buf, CY_CMD_CAT_CALIBRATE_IDAC_CMD_SZ,
-			return_buf, CY_CMD_CAT_CALIBRATE_IDAC_RET_SZ,
-			CY_CALIBRATE_COMPLETE_TIMEOUT);
-	if (rc < 0) {
-		dev_err(dev, "%s: Unable to execute calibrate command.\n",
+	if (retval < 0) {
+		dev_err(&ttsp->dev,
+			"%s: Fail request firmware class file load\n",
 			__func__);
-		goto exit_setmode;
+		return retval;
 	}
-	if (return_buf[0] != CY_CMD_STATUS_SUCCESS) {
-		dev_err(dev, "%s: calibrate command unsuccessful\n", __func__);
-		goto exit_setmode;
-	}
-
-	cmd_buf[1] = 0x01; /* Mutual Capacitance Button */
-	rc = cyttsp4_request_exec_cmd(ttsp, CY_MODE_CAT,
-			cmd_buf, CY_CMD_CAT_CALIBRATE_IDAC_CMD_SZ,
-			return_buf, CY_CMD_CAT_CALIBRATE_IDAC_RET_SZ,
-			CY_CALIBRATE_COMPLETE_TIMEOUT);
-	if (rc < 0) {
-		dev_err(dev, "%s: Unable to execute calibrate command.\n",
-			__func__);
-		goto exit_setmode;
-	}
-	if (return_buf[0] != CY_CMD_STATUS_SUCCESS) {
-		dev_err(dev, "%s: calibrate command unsuccessful\n", __func__);
-		goto exit_setmode;
-	}
-
-	cmd_buf[1] = 0x02; /* Self Capacitance */
-	rc = cyttsp4_request_exec_cmd(ttsp, CY_MODE_CAT,
-			cmd_buf, CY_CMD_CAT_CALIBRATE_IDAC_CMD_SZ,
-			return_buf, CY_CMD_CAT_CALIBRATE_IDAC_RET_SZ,
-			CY_CALIBRATE_COMPLETE_TIMEOUT);
-	if (rc < 0) {
-		dev_err(dev, "%s: Unable to execute calibrate command.\n",
-			__func__);
-		goto exit_setmode;
-	}
-	if (return_buf[0] != CY_CMD_STATUS_SUCCESS) {
-		dev_err(dev, "%s: calibrate command unsuccessful\n", __func__);
-		goto exit_setmode;
-	}
-
-exit_setmode:
-	rc = cyttsp4_request_set_mode(ttsp, CY_MODE_OPERATIONAL);
-	if (rc < 0)
-		dev_err(dev, "%s: Error on request set mode 2 r=%d\n",
-				__func__, rc);
-
-exit_release:
-	rc = cyttsp4_release_exclusive(ttsp);
-	if (rc < 0)
-		dev_err(dev, "%s: Error on release exclusive r=%d\n",
-				__func__, rc);
-
-exit:
-	pm_runtime_put(dev);
-}
-
-static int cyttsp4_fw_calibration_attention(struct cyttsp4_device *ttsp)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	int rc = 0;
-
-	dev_vdbg(dev, "%s\n", __func__);
-
-	schedule_work(&data->calibration_work);
-
-	cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_STARTUP,
-		cyttsp4_fw_calibration_attention, 0);
-
-	return rc;
-}
-
-static int cyttsp4_upgrade_firmware(struct cyttsp4_device *ttsp,
-		const u8 *fw_img, int fw_size)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	int rc;
-
-	pm_runtime_get_sync(dev);
-
-printk("[TP] %s enter cyttsp4_request_exclusive...........\n", __func__);
-//	rc = cyttsp4_request_exclusive(ttsp, CY_LDR_REQUEST_EXCLUSIVE_TIMEOUT);
-	rc = cyttsp4_request_exclusive(ttsp, 10000);
-printk("[TP] %s exit cyttsp4_request_exclusive...........\n", __func__);
-	if (rc < 0)
-		goto exit;
-
-	rc = _cyttsp4_load_app(ttsp, fw_img, fw_size);
-	if (rc < 0) {
-		dev_err(dev, "%s: Firmware update failed with error code %d\n",
-			__func__, rc);
-	} else if (data->loader_pdata &&
-			(data->loader_pdata->flags &
-				CY_LOADER_FLAG_CALIBRATE_AFTER_FW_UPGRADE)) {
-		/* set up call back for startup */
-		dev_vdbg(dev, "%s: Adding callback for calibration\n",
-			__func__);
-		rc = cyttsp4_subscribe_attention(ttsp, CY_ATTEN_STARTUP,
-				cyttsp4_fw_calibration_attention, 0);
-		if (rc) {
-			dev_err(dev, "%s: Failed adding callback for calibration\n",
-				__func__);
-			dev_err(dev, "%s: No calibration will be performed\n",
-				__func__);
-			rc = 0;
-		}
-	}
-
-	cyttsp4_release_exclusive(ttsp);
-	cyttsp4_request_restart(ttsp, false);
-
-exit:
-	pm_runtime_put(dev);
-	return rc;
-}
-
-static int cyttsp4_loader_attention(struct cyttsp4_device *ttsp)
-{
-	struct cyttsp4_loader_data *data = dev_get_drvdata(&ttsp->dev);
-	complete(&data->int_running);
-	return 0;
-}
-#endif /* CYTTSP4_FW_UPGRADE */
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_FW_UPGRADE
-static int cyttsp4_check_firmware_version_platform(struct cyttsp4_device *ttsp,
-		struct cyttsp4_touch_firmware *fw)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-#if 0
-	u32 fw_ver_new;
-	u32 fw_revctrl_new_h;
-	u32 fw_revctrl_new_l;
-#endif
-	int upgrade = 0;
-
-	if (!data->si) {
-		dev_info(dev, "%s: No firmware infomation found, device FW may be corrupted\n",
-			__func__);
-		return CYTTSP4_AUTO_LOAD_FOR_CORRUPTED_FW;
-	}
-#if 0
-	fw_ver_new = get_unaligned_be16(fw->ver + 2);
-	fw_revctrl_new_h = get_unaligned_be32(fw->ver + 4);
-	fw_revctrl_new_l = get_unaligned_be32(fw->ver + 8);
-
-	upgrade = cyttsp4_check_firmware_version(ttsp, fw_ver_new,
-			fw_revctrl_new_h, fw_revctrl_new_l);
-#endif
-	upgrade = cyttsp4_check_upgrade(ttsp);
-
-	if (upgrade > 0)
-		return 1;
 
 	return 0;
 }
 
-static int upgrade_firmware_from_platform(struct cyttsp4_device *ttsp,
-		bool forced)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	struct cyttsp4_touch_firmware *fw;
-	int rc = -ENOSYS;
-	int upgrade;
-
-	if (data->loader_pdata == NULL) {
-		dev_err(dev, "%s: No loader platform data\n", __func__);
-		return rc;
-	}
-
-	fw = data->loader_pdata->fw;
-	if (fw == NULL || fw->img == NULL || fw->size == 0) {
-		dev_err(dev, "%s: No platform firmware\n", __func__);
-		return rc;
-	}
-
-	if (fw->ver == NULL || fw->vsize == 0) {
-		dev_err(dev, "%s: No platform firmware version\n",
-			__func__);
-		return rc;
-	}
-
-	if (forced)
-		upgrade = forced;
-	else
-		upgrade = cyttsp4_check_firmware_version_platform(ttsp, fw);
-
-	if (upgrade)
-		return cyttsp4_upgrade_firmware(ttsp, fw->img, fw->size);
-
-	return rc;
-}
-#endif /* CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_FW_UPGRADE */
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE
 static void _cyttsp4_firmware_cont(const struct firmware *fw, void *context)
 {
 	struct cyttsp4_device *ttsp = context;
 	struct device *dev = &ttsp->dev;
+	struct cyttsp4_loader_data *data = dev_get_drvdata(&ttsp->dev);
+	struct cyttsp4_core_platform_data *core_pdata =
+				dev_get_platdata(&ttsp->core->dev);
+	int retval = 0;
 	u8 header_size = 0;
 
 	if (fw == NULL)
@@ -1150,43 +800,134 @@ static void _cyttsp4_firmware_cont(const struct firmware *fw, void *context)
 		goto cyttsp4_firmware_cont_release_exit;
 	}
 
-	cyttsp4_upgrade_firmware(ttsp, &(fw->data[header_size + 1]),
+	pm_runtime_get_sync(dev);
+
+	retval = cyttsp4_request_exclusive(ttsp, 5000);
+	if (retval < 0)
+		goto cyttsp4_firmware_cont_release_exit;
+
+	retval = _cyttsp4_load_app(ttsp, &(fw->data[header_size + 1]),
 		fw->size - (header_size + 1));
+	if (retval < 0) {
+		dev_err(dev,
+			"%s: Firmware update failed with error code %d\n",
+			__func__, retval);
+	}
+	dev_info(dev, "%s: Firmware update finished.\n",  __func__);
+	cyttsp4_release_exclusive(ttsp);
+	if (core_pdata->use_auto_calibration) {
+		if (data->si)
+			cyttsp4_request_calibration(ttsp,
+					data->si->si_ptrs.pcfg->config_ver);
+		else
+			cyttsp4_request_calibration(ttsp, 0);
+	}
+	cyttsp4_request_restart(ttsp);
 
 cyttsp4_firmware_cont_release_exit:
+	pm_runtime_put(dev);
 	release_firmware(fw);
 
 cyttsp4_firmware_cont_exit:
 	return;
 }
 
-static int cyttsp4_check_firmware_version_builtin(struct cyttsp4_device *ttsp,
+/*
+ * return code
+ *  0: Do not upgrade firmware
+ * !0: Do a firmware upgrade
+ *
+ */
+static int cyttsp4_check_version(struct cyttsp4_device *ttsp,
 		const struct firmware *fw)
 {
+	struct cyttsp4_loader_data *data = dev_get_drvdata(&ttsp->dev);
 	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
+	u32 fw_ver_img;
+	u32 fw_revctrl_img_h;
+	u32 fw_revctrl_img_l;
 	u32 fw_ver_new;
 	u32 fw_revctrl_new_h;
 	u32 fw_revctrl_new_l;
-	int upgrade;
 
 	if (!data->si) {
-		dev_info(dev, "%s: No firmware infomation found, device FW may be corrupted\n",
-			__func__);
+		dev_dbg(dev, "%s: No firmware infomation found," \
+			" device FW may be corrupted\n", __func__);
 		return CYTTSP4_AUTO_LOAD_FOR_CORRUPTED_FW;
 	}
 
-	fw_ver_new = get_unaligned_be16(fw->data + 3);
-	fw_revctrl_new_h = get_unaligned_be32(fw->data + 5);
-	fw_revctrl_new_l = get_unaligned_be32(fw->data + 9);
+	if (GET_FW_PROJ(data->si->si_ptrs.pcfg->config_ver) !=
+		CYTTSP4_FW_PROJ_WUKONG) {
+		dev_info(dev, "%s: FW project ID not match, will NOT upgrade\n",
+			__func__);
+		goto cyttsp4_firmware_no_upgrade;
+	}
 
-	upgrade = cyttsp4_check_firmware_version(ttsp, fw_ver_new,
-			fw_revctrl_new_h, fw_revctrl_new_l);
+	fw_ver_img = data->si->si_ptrs.cydata->fw_ver_major << 8;
+	fw_ver_img += data->si->si_ptrs.cydata->fw_ver_minor;
+	fw_ver_new = (u8)fw->data[3] << 8;
+	fw_ver_new += (u8)fw->data[4];
 
-	if (upgrade > 0)
-		return 1;
+	dev_info(dev, "%s: img vers:0x%04X new vers:0x%04X\n", __func__,
+			fw_ver_img, fw_ver_new);
 
+	if (fw_ver_new > fw_ver_img) {
+		dev_dbg(dev, "%s: Image is newer, will upgrade\n",
+				__func__);
+		goto cyttsp4_firmware_upgrade;
+	}
+
+	if (fw_ver_new < fw_ver_img) {
+		dev_dbg(dev, "%s: Image is older, will NOT upgrade\n",
+				__func__);
+		goto cyttsp4_firmware_no_upgrade;
+	}
+
+	fw_revctrl_img_h = be32_to_cpu(
+		*(u32 *)(data->si->si_ptrs.cydata->revctrl + 0));
+	fw_revctrl_new_h = be32_to_cpu(*(u32 *)(fw->data + 5));
+
+	dev_info(dev, "%s: img revctrl_h:0x%04X new revctrl_h:0x%04X\n",
+			__func__, fw_revctrl_img_h, fw_revctrl_new_h);
+
+	if (fw_revctrl_new_h > fw_revctrl_img_h) {
+		dev_dbg(dev, "%s: Image is newer, will upgrade\n",
+				__func__);
+		goto cyttsp4_firmware_upgrade;
+	}
+
+	if (fw_revctrl_new_h < fw_revctrl_img_h) {
+		dev_dbg(dev, "%s: Image is older, will NOT upgrade\n",
+				__func__);
+		goto cyttsp4_firmware_no_upgrade;
+	}
+
+	fw_revctrl_img_l = be32_to_cpu(
+		*(u32 *)(data->si->si_ptrs.cydata->revctrl + 4));
+	fw_revctrl_new_l = be32_to_cpu(*(u32 *)(fw->data + 9));
+
+	dev_info(dev, "%s: img revctrl_l:0x%04X new revctrl_l:0x%04X\n",
+			__func__, fw_revctrl_img_l, fw_revctrl_new_l);
+
+	if (fw_revctrl_new_l > fw_revctrl_img_l) {
+		dev_dbg(dev, "%s: Image is newer, will upgrade\n",
+				__func__);
+		goto cyttsp4_firmware_upgrade;
+	}
+
+	if (fw_revctrl_new_l < fw_revctrl_img_l) {
+		dev_dbg(dev, "%s: Image is older, will NOT upgrade\n",
+				__func__);
+		goto cyttsp4_firmware_no_upgrade;
+	}
+
+	/* equal */
+	dev_dbg(dev, "%s: Image is same, will NOT upgrade\n", __func__);
+cyttsp4_firmware_no_upgrade:
 	return 0;
+
+cyttsp4_firmware_upgrade:
+	return 1;
 }
 
 static void _cyttsp4_firmware_cont_builtin(const struct firmware *fw,
@@ -1194,546 +935,73 @@ static void _cyttsp4_firmware_cont_builtin(const struct firmware *fw,
 {
 	struct cyttsp4_device *ttsp = context;
 	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
 	int upgrade;
 
 	if (fw == NULL) {
-		dev_info(dev, "%s: No builtin firmware\n", __func__);
+		dev_err(dev,
+			"%s: NULL firmware received\n", __func__);
 		goto _cyttsp4_firmware_cont_builtin_exit;
 	}
 
 	if (fw->data == NULL || fw->size == 0) {
-		dev_err(dev, "%s: Invalid builtin firmware\n", __func__);
+		dev_err(dev,
+			"%s: No firmware received\n", __func__);
 		goto _cyttsp4_firmware_cont_builtin_exit;
 	}
-
 	dev_dbg(dev, "%s: Found firmware\n", __func__);
 
-	upgrade = cyttsp4_check_firmware_version_builtin(ttsp, fw);
+	upgrade = cyttsp4_check_version(ttsp, fw);
 	if (upgrade) {
 		_cyttsp4_firmware_cont(fw, ttsp);
-		data->builtin_bin_fw_status = 0;
-		complete(&data->builtin_bin_fw_complete);
 		return;
 	}
-
 _cyttsp4_firmware_cont_builtin_exit:
 	release_firmware(fw);
-
-	data->builtin_bin_fw_status = -EINVAL;
-	complete(&data->builtin_bin_fw_complete);
 }
 
-static int upgrade_firmware_from_class(struct cyttsp4_device *ttsp)
+static int _start_fw_builtin(struct cyttsp4_device *ttsp,
+		void (*cont) (const struct firmware *fw, void *context))
 {
+	struct device *dev = &ttsp->dev;
 	int retval;
 
-	dev_vdbg(&ttsp->dev, "%s: Enabling firmware class loader\n", __func__);
+	dev_vdbg(dev,
+		"%s: Enabling firmware class loader built-in\n", __func__);
 
-	retval = request_firmware_nowait(THIS_MODULE, FW_ACTION_NOHOTPLUG, "",
-			&ttsp->dev, GFP_KERNEL, ttsp, _cyttsp4_firmware_cont);
+	retval = request_firmware_nowait(THIS_MODULE,
+		FW_ACTION_HOTPLUG, CY_FW_FILE_NAME, dev,
+		GFP_KERNEL, ttsp, cont);
 	if (retval < 0) {
-		dev_err(&ttsp->dev, "%s: Fail request firmware class file load\n",
+		dev_err(dev,
+			"%s: Fail request firmware class file load\n",
 			__func__);
-		return retval;
 	}
 
+	return retval;
+}
+
+static int cyttsp4_loader_attention(struct cyttsp4_device *ttsp)
+{
+	struct cyttsp4_loader_data *data = dev_get_drvdata(&ttsp->dev);
+	complete(&data->int_running);
 	return 0;
 }
 
-static int upgrade_firmware_from_builtin(struct cyttsp4_device *ttsp)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	int retval;
-
-	dev_vdbg(dev, "%s: Enabling firmware class loader built-in\n",
-		__func__);
-
-	retval = request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG,
-			CY_FW_FILE_NAME, dev, GFP_KERNEL, ttsp,
-			_cyttsp4_firmware_cont_builtin);
-	if (retval < 0) {
-		dev_err(dev, "%s: Fail request firmware class file load\n",
-			__func__);
-		return retval;
-	}
-
-	/* wait until FW binary upgrade finishes */
-	wait_for_completion(&data->builtin_bin_fw_complete);
-
-	return data->builtin_bin_fw_status;
-}
-#endif /* CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE */
-
-#if CYTTSP4_TTCONFIG_UPGRADE
-static int cyttsp4_upgrade_ttconfig(struct cyttsp4_device *ttsp,
-		const u8 *ttconfig_data, int ttconfig_size)
-{
-	struct device *dev = &ttsp->dev;
-	int rc, rc2;
-
-	dev_vdbg(dev, "%s\n", __func__);
-
-	pm_runtime_get_sync(dev);
-
-	dev_vdbg(dev, "%s: Requesting exclusive\n", __func__);
-	rc = cyttsp4_request_exclusive(ttsp, CY_LDR_REQUEST_EXCLUSIVE_TIMEOUT);
-	if (rc < 0) {
-		dev_err(dev, "%s: Error on request exclusive r=%d\n",
-				__func__, rc);
-		goto exit;
-	}
-
-	dev_vdbg(dev, "%s: Requesting mode change to CAT\n", __func__);
-	rc = cyttsp4_request_set_mode(ttsp, CY_MODE_CAT);
-	if (rc < 0) {
-		dev_err(dev, "%s: Error on request set mode r=%d\n",
-				__func__, rc);
-		goto exit_release;
-	}
-
-	rc = cyttsp4_request_write_config(ttsp, CY_TCH_PARM_EBID,
-			0, (u8 *)ttconfig_data, ttconfig_size);
-	if (rc < 0) {
-		dev_err(dev, "%s: Error on request write config r=%d\n",
-				__func__, rc);
-		goto exit_setmode;
-	}
-
-exit_setmode:
-	rc2 = cyttsp4_request_set_mode(ttsp, CY_MODE_OPERATIONAL);
-	if (rc2 < 0)
-		dev_err(dev, "%s: Error on request set mode r=%d\n",
-				__func__, rc2);
-
-exit_release:
-	rc2 = cyttsp4_release_exclusive(ttsp);
-	if (rc < 0)
-		dev_err(dev, "%s: Error on release exclusive r=%d\n",
-				__func__, rc2);
-
-exit:
-	if (!rc)
-		cyttsp4_request_restart(ttsp, true);
-
-	pm_runtime_put(dev);
-
-	return rc;
-}
-#endif /* CYTTSP4_TTCONFIG_UPGRADE */
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_TTCONFIG_UPGRADE
-static int cyttsp4_get_ttconfig_crc(struct cyttsp4_device *ttsp,
-		const u8 *ttconfig_data, int ttconfig_size, u16 *crc)
-{
-	u16 crc_loc;
-
-	crc_loc = get_unaligned_le16(&ttconfig_data[2]);
-	if (ttconfig_size < crc_loc + 2)
-		return -EINVAL;
-
-	*crc = get_unaligned_le16(&ttconfig_data[crc_loc]);
-
-	return 0;
-}
-
-static int cyttsp4_get_ttconfig_version(struct cyttsp4_device *ttsp,
-		const u8 *ttconfig_data, int ttconfig_size, u16 *version)
-{
-	if (ttconfig_size < CY_TTCONFIG_VERSION_OFFSET
-			+ CY_TTCONFIG_VERSION_SIZE)
-		return -EINVAL;
-
-	*version = get_unaligned_le16(
-		&ttconfig_data[CY_TTCONFIG_VERSION_OFFSET]);
-
-	return 0;
-}
-
-static int cyttsp4_check_ttconfig_version(struct cyttsp4_device *ttsp,
-		const u8 *ttconfig_data, int ttconfig_size)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	int rc;
-
-	if (!data->si)
-		return 0;
-
-	/* Check if device POST config CRC test failed */
-	if (!(data->si->si_ptrs.test->post_codel &
-			CY_POST_CODEL_CFG_DATA_CRC_FAIL)) {
-		dev_info(dev, "%s: Config CRC invalid, will upgrade\n",
-			__func__);
-		return 1;
-	}
-
-	/* Check for config version */
-	if (data->loader_pdata->flags &
-			CY_LOADER_FLAG_CHECK_TTCONFIG_VERSION) {
-		u16 cfg_ver_new;
-
-		rc = cyttsp4_get_ttconfig_version(ttsp, ttconfig_data,
-				ttconfig_size, &cfg_ver_new);
-		if (rc)
-			return 0;
-
-		dev_dbg(dev, "%s: img_ver:0x%04X new_ver:0x%04X\n",
-			__func__, data->si->ttconfig.version, cfg_ver_new);
-
-		/* Check if config version is newer */
-		if (cfg_ver_new > data->si->ttconfig.version) {
-			dev_dbg(dev, "%s: Config version newer, will upgrade\n",
-				__func__);
-			return 1;
-		}
-
-		dev_dbg(dev, "%s: Config version is identical or older, will NOT upgrade\n",
-			__func__);
-	/* Check for config CRC */
-	} else {
-		u16 cfg_crc_new;
-
-		rc = cyttsp4_get_ttconfig_crc(ttsp, ttconfig_data,
-				ttconfig_size, &cfg_crc_new);
-		if (rc)
-			return 0;
-
-		dev_dbg(dev, "%s: img_crc:0x%04X new_crc:0x%04X\n",
-			__func__, data->si->ttconfig.crc, cfg_crc_new);
-
-		/* Check if config CRC different. */
-		if (cfg_crc_new != data->si->ttconfig.crc) {
-			dev_dbg(dev, "%s: Config CRC different, will upgrade\n",
-				__func__);
-			return 1;
-		}
-
-		dev_dbg(dev, "%s: Config CRC equal, will NOT upgrade\n",
-			__func__);
-	}
-
-	return 0;
-}
-
-static int cyttsp4_check_ttconfig_version_platform(struct cyttsp4_device *ttsp,
-		struct cyttsp4_touch_config *ttconfig)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	u32 fw_ver_config;
-	u32 fw_revctrl_config_h;
-	u32 fw_revctrl_config_l;
-
-	if (!data->si) {
-		dev_info(dev, "%s: No firmware infomation found, device FW may be corrupted\n",
-			__func__);
-		return 0;
-	}
-
-	fw_ver_config = get_unaligned_be16(ttconfig->fw_ver + 2);
-	fw_revctrl_config_h = get_unaligned_be32(ttconfig->fw_ver + 4);
-	fw_revctrl_config_l = get_unaligned_be32(ttconfig->fw_ver + 8);
-
-	/* FW versions should match */
-	if (cyttsp4_check_firmware_version(ttsp, fw_ver_config,
-			fw_revctrl_config_h, fw_revctrl_config_l)) {
-		dev_err(dev, "%s: FW versions mismatch\n", __func__);
-		return 0;
-	}
-
-	return cyttsp4_check_ttconfig_version(ttsp, ttconfig->param_regs->data,
-			ttconfig->param_regs->size);
-}
-
-static int upgrade_ttconfig_from_platform(struct cyttsp4_device *ttsp)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	struct cyttsp4_touch_config *ttconfig;
-	struct touch_settings *param_regs;
-	struct cyttsp4_touch_fw;
-	int rc = -ENOSYS;
-	int upgrade;
-
-	if (data->loader_pdata == NULL) {
-		dev_info(dev, "%s: No loader platform data\n", __func__);
-		return rc;
-	}
-
-	ttconfig = data->loader_pdata->ttconfig;
-	if (ttconfig == NULL) {
-		dev_info(dev, "%s: No ttconfig data\n", __func__);
-		return rc;
-	}
-
-	param_regs = ttconfig->param_regs;
-	if (param_regs == NULL) {
-		dev_info(dev, "%s: No touch parameters\n", __func__);
-		return rc;
-	}
-
-	if (param_regs->data == NULL || param_regs->size == 0) {
-		dev_info(dev, "%s: Invalid touch parameters\n", __func__);
-		return rc;
-	}
-
-	if (ttconfig->fw_ver == NULL || ttconfig->fw_vsize == 0) {
-		dev_info(dev, "%s: Invalid FW version for touch parameters\n",
-			__func__);
-		return rc;
-	}
-
-	upgrade = cyttsp4_check_ttconfig_version_platform(ttsp, ttconfig);
-	if (upgrade)
-		return cyttsp4_upgrade_ttconfig(ttsp, param_regs->data,
-				param_regs->size);
-
-	return rc;
-}
-#endif /* CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_TTCONFIG_UPGRADE */
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_MANUAL_TTCONFIG_UPGRADE
-static ssize_t cyttsp4_config_data_write(struct file *filp,
-		struct kobject *kobj, struct bin_attribute *bin_attr,
-		char *buf, loff_t offset, size_t count)
-{
-	struct device *dev = container_of(kobj, struct device, kobj);
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	u8 *p;
-
-	dev_vdbg(dev, "%s: offset:%lld count:%d\n", __func__, offset, count);
-
-	mutex_lock(&data->config_lock);
-
-	if (!data->config_loading) {
-		mutex_unlock(&data->config_lock);
-		return -ENODEV;
-	}
-
-	p = krealloc(data->config_data, offset + count, GFP_KERNEL);
-	if (!p) {
-		kfree(data->config_data);
-		data->config_data = NULL;
-		data->config_size = 0;
-		data->config_loading = false;
-		mutex_unlock(&data->config_lock);
-		return -ENOMEM;
-	}
-	data->config_data = p;
-
-	memcpy(&data->config_data[offset], buf, count);
-	data->config_size += count;
-
-	mutex_unlock(&data->config_lock);
-
-	return count;
-}
-
-static struct bin_attribute bin_attr_config_data = {
-	.attr = {
-		.name = "config_data",
-		.mode = S_IWUSR,
-	},
-	.size = 0,
-	.write = cyttsp4_config_data_write,
-};
-
-static ssize_t cyttsp4_config_loading_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	bool config_loading;
-
-	mutex_lock(&data->config_lock);
-	config_loading = data->config_loading;
-	mutex_unlock(&data->config_lock);
-
-	return sprintf(buf, "%d\n", config_loading);
-}
-
-static int cyttsp4_verify_ttconfig_binary(struct cyttsp4_device *ttsp,
-		u8 *bin_config_data, int bin_config_size, u8 **start, int *len)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	int header_size;
-	u16 config_size;
-	u16 max_config_size;
-	u32 fw_ver_config;
-	u32 fw_revctrl_config_h;
-	u32 fw_revctrl_config_l;
-
-	if (!data->si) {
-		dev_err(dev, "%s: No firmware infomation found, device FW may be corrupted\n",
-			__func__);
-		return -ENODEV;
-	}
-
-	/*
-	 * We need 11 bytes for FW version control info and at
-	 * least 6 bytes in config (Length + Max Length + CRC)
-	 */
-	header_size = bin_config_data[0] + 1;
-	if (header_size < 11 || header_size >= bin_config_size - 6) {
-		dev_err(dev, "%s: Invalid header size %d\n", __func__,
-			header_size);
-		return -EINVAL;
-	}
-
-	fw_ver_config = get_unaligned_be16(&bin_config_data[1]);
-	fw_revctrl_config_h = get_unaligned_be32(&bin_config_data[3]);
-	fw_revctrl_config_l = get_unaligned_be32(&bin_config_data[7]);
-
-	/* FW versions should match */
-	if (cyttsp4_check_firmware_version(ttsp, fw_ver_config,
-			fw_revctrl_config_h, fw_revctrl_config_l)) {
-		dev_err(dev, "%s: FW versions mismatch\n", __func__);
-		return -EINVAL;
-	}
-
-	config_size = get_unaligned_le16(&bin_config_data[header_size]);
-	max_config_size =
-		get_unaligned_le16(&bin_config_data[header_size + 2]);
-	/* Perform a simple size check (2 bytes for CRC) */
-	if (config_size != bin_config_size - header_size - 2) {
-		dev_err(dev, "%s: Config size invalid\n", __func__);
-		return -EINVAL;
-	}
-	/* Perform a size check against device config length */
-	if (config_size != data->si->ttconfig.length
-			|| max_config_size != data->si->ttconfig.max_length) {
-		dev_err(dev, "%s: Config size mismatch\n", __func__);
-		return -EINVAL;
-	}
-
-	*start = &bin_config_data[header_size];
-	*len = bin_config_size - header_size;
-
-	return 0;
-}
-
-/*
- * 1: Start loading TT Config
- * 0: End loading TT Config and perform upgrade
- *-1: Exit loading
- */
-static ssize_t cyttsp4_config_loading_store(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t size)
-{
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	long value;
-	u8 *start;
-	int length;
-	int rc;
-
-	rc = kstrtol(buf, 10, &value);
-	if (rc < 0 || value < -1 || value > 1) {
-		dev_err(dev, "%s: Invalid value\n", __func__);
-		return size;
-	}
-
-	mutex_lock(&data->config_lock);
-
-	if (value == 1)
-		data->config_loading = true;
-	else if (value == -1)
-		data->config_loading = false;
-	else if (value == 0 && data->config_loading) {
-		data->config_loading = false;
-		if (data->config_size == 0) {
-			dev_err(dev, "%s: No config data\n", __func__);
-			goto exit_free;
-		}
-
-		rc = cyttsp4_verify_ttconfig_binary(data->ttsp,
-				data->config_data, data->config_size,
-				&start, &length);
-		if (rc)
-			goto exit_free;
-
-		rc = cyttsp4_upgrade_ttconfig(data->ttsp, start, length);
-	}
-
-exit_free:
-	kfree(data->config_data);
-	data->config_data = NULL;
-	data->config_size = 0;
-
-	mutex_unlock(&data->config_lock);
-
-	if (rc)
-		return rc;
-
-	return size;
-}
-
-static DEVICE_ATTR(config_loading, S_IRUSR | S_IWUSR,
-	cyttsp4_config_loading_show, cyttsp4_config_loading_store);
-#endif /* CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_MANUAL_TTCONFIG_UPGRADE */
-
-static void cyttsp4_fw_and_config_upgrade(
-		struct work_struct *fw_and_config_upgrade)
-{
-	struct cyttsp4_loader_data *data = container_of(fw_and_config_upgrade,
-			struct cyttsp4_loader_data, fw_and_config_upgrade);
-	struct cyttsp4_device *ttsp = data->ttsp;
-	struct device *dev = &ttsp->dev;
-
-	data->si = cyttsp4_request_sysinfo(ttsp);
-	if (data->si == NULL)
-		dev_err(dev, "%s: Fail get sysinfo pointer from core\n",
-			__func__);
-
-#if !CYTTSP4_FW_UPGRADE
-	dev_info(dev, "%s: No FW upgrade method selected!\n", __func__);
-#endif
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_FW_UPGRADE
-	if (!upgrade_firmware_from_platform(ttsp, false))
-		return;
-#endif
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE
-	if (!upgrade_firmware_from_builtin(ttsp))
-		return;
-#endif
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_TTCONFIG_UPGRADE
-	if (!upgrade_ttconfig_from_platform(ttsp))
-		return;
-#endif
-}
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_FW_UPGRADE
-static ssize_t cyttsp4_forced_upgrade_store(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t size)
-{
-	int rc;
-	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	rc = upgrade_firmware_from_platform(data->ttsp, true);
-	if (rc)
-		return rc;
-	return size;
-}
-
-static DEVICE_ATTR(forced_upgrade, S_IRUSR | S_IWUSR,
-	NULL, cyttsp4_forced_upgrade_store);
-#endif
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE
 static ssize_t cyttsp4_manual_upgrade_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	upgrade_firmware_from_class(data->ttsp);
+	int rc;
+
+	rc = _start_fw_class(data->ttsp, _cyttsp4_firmware_cont);
+	if (rc < 0)
+		return rc;
+
 	return size;
 }
 
 static DEVICE_ATTR(manual_upgrade, S_IRUSR | S_IWUSR,
 	NULL, cyttsp4_manual_upgrade_store);
-#endif
 
 static int cyttsp4_loader_probe(struct cyttsp4_device *ttsp)
 {
@@ -1749,82 +1017,41 @@ static int cyttsp4_loader_probe(struct cyttsp4_device *ttsp)
 		goto error_alloc_data_failed;
 	}
 
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_FW_UPGRADE
-	rc = device_create_file(dev, &dev_attr_forced_upgrade);
-	if (rc) {
-		dev_err(dev, "%s: Error, could not create forced_upgrade\n",
-				__func__);
-		goto error_create_forced_upgrade;
-	}
-#endif
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE
 	rc = device_create_file(dev, &dev_attr_manual_upgrade);
 	if (rc) {
 		dev_err(dev, "%s: Error, could not create manual_upgrade\n",
 				__func__);
-		goto error_create_manual_upgrade;
-	}
-#endif
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_MANUAL_TTCONFIG_UPGRADE
-	rc = device_create_file(dev, &dev_attr_config_loading);
-	if (rc) {
-		dev_err(dev, "%s: Error, could not create config_loading\n",
-				__func__);
-		goto error_create_config_loading;
+		goto error_attr_create_failed;
 	}
 
-	rc = device_create_bin_file(dev, &bin_attr_config_data);
-	if (rc) {
-		dev_err(dev, "%s: Error, could not create config_data\n",
-				__func__);
-		goto error_create_config_data;
-	}
-#endif
-
-	data->loader_pdata = cyttsp4_request_loader_pdata(ttsp);
 	data->ttsp = ttsp;
 	dev_set_drvdata(dev, data);
+	init_completion(&(data->int_running));
 
 	pm_runtime_enable(dev);
 
-#if CYTTSP4_FW_UPGRADE
-	init_completion(&data->int_running);
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE
-	init_completion(&data->builtin_bin_fw_complete);
-#endif
+	pm_runtime_get_sync(dev);
+	data->si = cyttsp4_request_sysinfo(ttsp);
+	if (data->si == NULL)
+		dev_warn(dev, "%s: Fail get sysinfo pointer from core\n",
+			__func__);
 	cyttsp4_subscribe_attention(ttsp, CY_ATTEN_IRQ,
 		cyttsp4_loader_attention, CY_MODE_BOOTLOADER);
-
-	INIT_WORK(&data->calibration_work, cyttsp4_fw_calibrate);
-#endif
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_MANUAL_TTCONFIG_UPGRADE
-	mutex_init(&data->config_lock);
-#endif
-	INIT_WORK(&data->fw_and_config_upgrade, cyttsp4_fw_and_config_upgrade);
-	schedule_work(&data->fw_and_config_upgrade);
+	rc = _start_fw_builtin(ttsp, _cyttsp4_firmware_cont_builtin);
+	if (rc < 0) {
+		dev_err(dev, "%s: Error, could not start firmware loader.\n",
+				__func__);
+		goto error_builtin_start_failed;
+	}
+	pm_runtime_put(dev);
 
 	dev_info(dev, "%s: Successful probe %s\n", __func__, ttsp->name);
 	return 0;
 
-
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_MANUAL_TTCONFIG_UPGRADE
-error_create_config_data:
-	device_remove_file(dev, &dev_attr_config_loading);
-error_create_config_loading:
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE
-	device_remove_file(dev, &dev_attr_manual_upgrade);
-#endif
-#endif
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE
-error_create_manual_upgrade:
-#endif
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_FW_UPGRADE
-	device_remove_file(dev, &dev_attr_forced_upgrade);
-error_create_forced_upgrade:
-#endif
+error_builtin_start_failed:
+	pm_runtime_put(dev);
+	pm_runtime_disable(dev);
+error_attr_create_failed:
 	kfree(data);
 error_alloc_data_failed:
 	dev_err(dev, "%s failed.\n", __func__);
@@ -1835,10 +1062,9 @@ static int cyttsp4_loader_release(struct cyttsp4_device *ttsp)
 {
 	struct device *dev = &ttsp->dev;
 	struct cyttsp4_loader_data *data = dev_get_drvdata(dev);
-	int retval = 0;
+	int retval;
 
 	dev_dbg(dev, "%s\n", __func__);
-#if CYTTSP4_FW_UPGRADE
 	retval = cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_IRQ,
 		cyttsp4_loader_attention, CY_MODE_BOOTLOADER);
 	if (retval < 0) {
@@ -1846,26 +1072,15 @@ static int cyttsp4_loader_release(struct cyttsp4_device *ttsp)
 			"%s: Failed to restart IC with error code %d\n",
 			__func__, retval);
 	}
-#endif
 	pm_runtime_suspend(dev);
 	pm_runtime_disable(dev);
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_MANUAL_TTCONFIG_UPGRADE
-	device_remove_bin_file(dev, &bin_attr_config_data);
-	device_remove_file(dev, &dev_attr_config_loading);
-	kfree(data->config_data);
-#endif
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_BINARY_FW_UPGRADE
 	device_remove_file(dev, &dev_attr_manual_upgrade);
-#endif
-#ifdef CONFIG_TOUCHSCREEN_CYPRESS_CYTTSP4_PLATFORM_FW_UPGRADE
-	device_remove_file(dev, &dev_attr_forced_upgrade);
-#endif
 	dev_set_drvdata(dev, NULL);
 	kfree(data);
 	return retval;
 }
 
-static struct cyttsp4_driver cyttsp4_loader_driver = {
+struct cyttsp4_driver cyttsp4_loader_driver = {
 	.probe = cyttsp4_loader_probe,
 	.remove = cyttsp4_loader_release,
 	.driver = {
@@ -1876,10 +1091,10 @@ static struct cyttsp4_driver cyttsp4_loader_driver = {
 };
 
 static const char cyttsp4_loader_name[] = CYTTSP4_LOADER_NAME;
-static struct cyttsp4_device_info cyttsp4_loader_infos[CY_MAX_NUM_CORE_DEVS];
+static struct cyttsp4_device cyttsp4_loader_devices[CY_MAX_NUM_CORE_DEVS];
 
 static char *core_ids[CY_MAX_NUM_CORE_DEVS] = {
-	CY_DEFAULT_CORE_ID,
+	"main_ttsp_core",
 	NULL,
 	NULL,
 	NULL,
@@ -1889,72 +1104,42 @@ static char *core_ids[CY_MAX_NUM_CORE_DEVS] = {
 static int num_core_ids = 1;
 
 module_param_array(core_ids, charp, &num_core_ids, 0);
-MODULE_PARM_DESC(core_ids,
-	"Core id list of cyttsp4 core devices for loader module");
+MODULE_PARM_DESC(core_ids, "Core id list of cyttsp4 core devices");
 
 static int __init cyttsp4_loader_init(void)
 {
 	int rc = 0;
-	int i, j;
+	int i = 0;
 
-	/* Check for invalid or duplicate core_ids */
-	for (i = 0; i < num_core_ids; i++) {
-		if (!strlen(core_ids[i])) {
-			pr_err("%s: core_id %d is empty\n",
-				__func__, i+1);
-			return -EINVAL;
-		}
-		for (j = i+1; j < num_core_ids; j++)
-			if (!strcmp(core_ids[i], core_ids[j])) {
-				pr_err("%s: core_ids %d and %d are same\n",
-					__func__, i+1, j+1);
-				return -EINVAL;
-			}
-	}
-
-	for (i = 0; i < num_core_ids; i++) {
-		cyttsp4_loader_infos[i].name = cyttsp4_loader_name;
-		cyttsp4_loader_infos[i].core_id = core_ids[i];
+	for (i = 0; i < num_core_ids && i < CY_MAX_NUM_CORE_DEVS; i++) {
+		cyttsp4_loader_devices[i].name = cyttsp4_loader_name;
+		cyttsp4_loader_devices[i].core_id = core_ids[i];
 		pr_info("%s: Registering loader device for core_id: %s\n",
-			__func__, cyttsp4_loader_infos[i].core_id);
-		rc = cyttsp4_register_device(&cyttsp4_loader_infos[i]);
+			__func__, cyttsp4_loader_devices[i].core_id);
+		rc = cyttsp4_register_device(&cyttsp4_loader_devices[i]);
 		if (rc < 0) {
 			pr_err("%s: Error, failed registering device\n",
 				__func__);
-			goto fail_unregister_devices;
+			goto cyttsp4_loader_init_exit;
 		}
 	}
 	rc = cyttsp4_register_driver(&cyttsp4_loader_driver);
-	if (rc) {
-		pr_err("%s: Error, failed registering driver\n", __func__);
-		goto fail_unregister_devices;
-	}
-
-	pr_info("%s: Cypress TTSP FW loader (Built %s) rc=%d\n",
-		 __func__, CY_DRIVER_DATE, rc);
-	return 0;
-
-fail_unregister_devices:
-	for (i--; i >= 0; i--) {
-		cyttsp4_unregister_device(cyttsp4_loader_infos[i].name,
-			cyttsp4_loader_infos[i].core_id);
-		pr_info("%s: Unregistering loader device for core_id: %s\n",
-			__func__, cyttsp4_loader_infos[i].core_id);
-	}
+	pr_info("%s: Cypress TTSP FW loader (Built %s @ %s) rc=%d\n",
+		 __func__, __DATE__, __TIME__, rc);
+cyttsp4_loader_init_exit:
 	return rc;
 }
 module_init(cyttsp4_loader_init);
 
 static void __exit cyttsp4_loader_exit(void)
 {
-	int i;
+	int i = 0;
 
 	cyttsp4_unregister_driver(&cyttsp4_loader_driver);
-	for (i = 0; i < num_core_ids; i++) {
-		cyttsp4_unregister_device(cyttsp4_loader_infos[i].name,
-			cyttsp4_loader_infos[i].core_id);
+	for (i = 0; i < num_core_ids && i < CY_MAX_NUM_CORE_DEVS; i++) {
+		cyttsp4_unregister_device(&cyttsp4_loader_devices[i]);
 		pr_info("%s: Unregistering loader device for core_id: %s\n",
-			__func__, cyttsp4_loader_infos[i].core_id);
+			__func__, cyttsp4_loader_devices[i].core_id);
 	}
 	pr_info("%s: module exit\n", __func__);
 }

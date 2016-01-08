@@ -1,5 +1,5 @@
 /*
- * cyttsp4_mtb.c
+ * cyttsp4_mta.c
  * Cypress TrueTouch(TM) Standard Product V4 Multi-touch module.
  * For use with Cypress Txx4xx parts.
  * Supported parts include:
@@ -31,58 +31,36 @@
  */
 
 #include <linux/input.h>
-#include <linux/input/mt.h>
 
 #include "cyttsp4_mt_common.h"
 
 static void cyttsp4_final_sync(struct input_dev *input, int max_tchs,
 		int mt_sync_count, int *ids)
 {
-	int t;
+	if (mt_sync_count)
+		input_sync(input);
+}
 
-	for (t = 0; t < max_tchs + 1; t++) {
-		if (ids[t])
-			continue;
-		input_mt_slot(input, t);
-		input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
-	}
-
-	input_sync(input);
+static void cyttsp4_input_sync(struct input_dev *input)
+{
+	input_mt_sync(input);
 }
 
 static void cyttsp4_input_report(struct input_dev *input, int sig, int t)
 {
-	input_mt_slot(input, t);
-	input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
-}
-
-static void cyttsp4_report_slot_liftoff(struct cyttsp4_mt_data *md)
-{
-	struct cyttsp4_sysinfo *si = md->si;
-	int t;
-
-	if (md->num_prv_tch == 0)
-		return;
-
-	for (t = 0; t < si->si_ofs.max_tchs + 1; t++) {
-		input_mt_slot(md->input, t);
-		input_mt_report_slot_state(md->input,
-			MT_TOOL_FINGER, false);
-	}
+	input_report_abs(input, sig, t);
 }
 
 static int cyttsp4_input_register_device(struct input_dev *input, int max_tchs)
 {
-	/* max num slots equals max touches + 1 for hover */
-	input_mt_init_slots(input, max_tchs + 1);
 	return input_register_device(input);
 }
 
 void cyttsp4_init_function_ptrs(struct cyttsp4_mt_data *md)
 {
-	md->mt_function.report_slot_liftoff = cyttsp4_report_slot_liftoff;
+	md->mt_function.report_slot_liftoff = NULL;
 	md->mt_function.final_sync = cyttsp4_final_sync;
-	md->mt_function.input_sync = NULL;
+	md->mt_function.input_sync = cyttsp4_input_sync;
 	md->mt_function.input_report = cyttsp4_input_report;
 	md->mt_function.input_register_device = cyttsp4_input_register_device;
 }

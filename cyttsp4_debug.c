@@ -8,6 +8,7 @@
  *
  * Copyright (C) 2012 Cypress Semiconductor
  * Copyright (C) 2011 Sony Ericsson Mobile Communications AB.
+ * Copyright (C) 2014 Sony Mobile Communications AB.
  *
  * Author: Aleksej Makarov <aleksej.makarov@sonyericsson.com>
  * Modified by: Cypress Semiconductor to add device functions
@@ -28,10 +29,11 @@
  *
  * Contact Cypress Semiconductor at www.cypress.com <ttdrivers@cypress.com>
  *
+ * NOTE: This file has been modified by Sony Mobile Communications AB.
+ * Modifications are licensed under the License.
  */
 
 #include <linux/cyttsp4_bus.h>
-#include <linux/cyttsp4_core.h>
 
 #include <linux/delay.h>
 #include <linux/gpio.h>
@@ -49,16 +51,6 @@
 
 #define CYTTSP4_DEBUG_NAME "cyttsp4_debug"
 
-enum cyttsp4_monitor_status {
-	CY_MNTR_DISABLED,
-	CY_MNTR_ENABLED,
-};
-
-struct cyttsp4_sensor_monitor {
-	enum cyttsp4_monitor_status mntr_status;
-	u8 sensor_data[150];		/* operational sensor data */
-};
-
 struct cyttsp4_debug_data {
 	struct cyttsp4_device *ttsp;
 	struct cyttsp4_debug_platform_data *pdata;
@@ -66,7 +58,6 @@ struct cyttsp4_debug_data {
 	uint32_t interrupt_count;
 	uint32_t formated_output;
 	struct mutex sysfs_lock;
-	struct cyttsp4_sensor_monitor monitor;
 	u8 pr_buf[CY_MAX_PRBUF_SIZE];
 };
 
@@ -78,24 +69,21 @@ struct cyttsp4_debug_platform_data {
  * This function provide output of combined xy_mode and xy_data.
  * Required by TTHE.
  */
-static void cyttsp4_pr_buf_op_mode(struct device *dev, u8 *pr_buf,
-		struct cyttsp4_sysinfo *si, u8 cur_touch)
+void cyttsp4_pr_buf_op_mode(struct device *dev, u8 *pr_buf,
+		struct cyttsp4_sysinfo *si, u8 curTouch)
 {
 	int i, k;
 	const char fmt[] = "%02X ";
 	int max = (CY_MAX_PRBUF_SIZE - 1) - sizeof(CY_PR_TRUNCATED);
-	int total_size = si->si_ofs.mode_size
-			+ (cur_touch * si->si_ofs.tch_rec_size);
+	int totalSize = si->si_ofs.mode_size
+			+ (curTouch * si->si_ofs.tch_rec_size);
 	u8 num_btns = si->si_ofs.num_btns;
-	/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
-	struct cyttsp4_debug_data *dd = dev_get_drvdata(dev);
-	/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add End */
 
 	pr_buf[0] = 0;
 	for (i = k = 0; i < si->si_ofs.mode_size && i < max; i++, k += 3)
 		scnprintf(pr_buf + k, CY_MAX_PRBUF_SIZE, fmt, si->xy_mode[i]);
 
-	for (i = 0; i < (cur_touch * si->si_ofs.tch_rec_size) && i < max;
+	for (i = 0; i < (curTouch * si->si_ofs.tch_rec_size) && i < max;
 			i++, k += 3)
 		scnprintf(pr_buf + k, CY_MAX_PRBUF_SIZE, fmt, si->xy_data[i]);
 
@@ -107,14 +95,10 @@ static void cyttsp4_pr_buf_op_mode(struct device *dev, u8 *pr_buf,
 				i++, k += 3)
 			scnprintf(pr_buf + k, CY_MAX_PRBUF_SIZE, fmt,
 					si->btn_rec_data[i]);
-		total_size += num_btns * si->si_ofs.btn_rec_size + 1;
+		totalSize += num_btns * si->si_ofs.btn_rec_size + 1;
 	}
-
-/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
-	if(dd->ttsp->core->dbg_msg_level & 0x2)
-		pr_info("%s=%s%s\n", "cyttsp4_OpModeData", pr_buf,
-				total_size <= max ? "" : CY_PR_TRUNCATED);
-/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
+	pr_info("%s=%s%s\n", "cyttsp4_OpModeData", pr_buf,
+			totalSize <= max ? "" : CY_PR_TRUNCATED);
 }
 
 static void cyttsp4_debug_print(struct device *dev, u8 *pr_buf, u8 *sptr,
@@ -124,9 +108,6 @@ static void cyttsp4_debug_print(struct device *dev, u8 *pr_buf, u8 *sptr,
 	int elem_size = sizeof("XX ") - 1;
 	int max = (CY_MAX_PRBUF_SIZE - 1) / elem_size;
 	int limit = size < max ? size : max;
-	/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
-	struct cyttsp4_debug_data *dd = dev_get_drvdata(dev);
-	/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add End */
 
 	if (limit < 0)
 		limit = 0;
@@ -135,15 +116,12 @@ static void cyttsp4_debug_print(struct device *dev, u8 *pr_buf, u8 *sptr,
 	for (i = j = 0; i < limit; i++, j += elem_size)
 		scnprintf(pr_buf + j, CY_MAX_PRBUF_SIZE - j, "%02X ", sptr[i]);
 
-/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
-	if(dd->ttsp->core->dbg_msg_level & 0x2)
-		pr_info("%s[0..%d]=%s%s\n", data_name, size ? size - 1 : 0, pr_buf,
-				size <= max ? "" : CY_PR_TRUNCATED);
-/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add End */
+	pr_info("%s[0..%d]=%s%s\n", data_name, size - 1, pr_buf,
+			size <= max ? "" : CY_PR_TRUNCATED);
 }
 
 static void cyttsp4_debug_formated(struct device *dev, u8 *pr_buf,
-		struct cyttsp4_sysinfo *si, u8 num_cur_rec)
+		struct cyttsp4_sysinfo *si, u8 num_cur_tch)
 {
 	u8 mode_size = si->si_ofs.mode_size;
 	u8 rep_len = si->xy_mode[si->si_ofs.rep_ofs];
@@ -155,19 +133,13 @@ static void cyttsp4_debug_formated(struct device *dev, u8 *pr_buf,
 	u8 data_name[] = "touch[99]";
 	int max_print_length = 18;
 	int i;
-	/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
-	struct cyttsp4_debug_data *dd = dev_get_drvdata(dev);
-	/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add End */
 
 	/* xy_mode */
 	cyttsp4_debug_print(dev, pr_buf, si->xy_mode, mode_size, "xy_mode");
 
 	/* xy_data */
 	if (rep_len > max_print_length) {
-		/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
-		if(dd->ttsp->core->dbg_msg_level & 0x2)
-			pr_info("xy_data[0..%d]:\n", rep_len);
-		/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
+		pr_info("xy_data[0..%d]:\n", rep_len);
 		for (i = 0; i < rep_len - max_print_length;
 				i += max_print_length) {
 			cyttsp4_debug_print(dev, pr_buf, si->xy_data + i,
@@ -177,12 +149,12 @@ static void cyttsp4_debug_formated(struct device *dev, u8 *pr_buf,
 			cyttsp4_debug_print(dev, pr_buf, si->xy_data + i,
 					rep_len - i, " ");
 	} else {
-		cyttsp4_debug_print(dev, pr_buf, si->xy_data,
-				rep_len - si->si_ofs.rep_hdr_size, "xy_data");
+		cyttsp4_debug_print(dev, pr_buf, si->xy_data, rep_len,
+				"xy_data");
 	}
 
 	/* touches */
-	for (i = 0; i < num_cur_rec; i++) {
+	for (i = 0; i < num_cur_tch; i++) {
 		scnprintf(data_name, sizeof(data_name) - 1, "touch[%u]", i);
 		cyttsp4_debug_print(dev, pr_buf,
 				si->xy_data + (i * tch_rec_size),
@@ -211,7 +183,7 @@ static int cyttsp4_xy_worker(struct cyttsp4_debug_data *dd)
 	struct device *dev = &dd->ttsp->dev;
 	struct cyttsp4_sysinfo *si = dd->si;
 	u8 tt_stat = si->xy_mode[si->si_ofs.tt_stat_ofs];
-	u8 num_cur_rec = GET_NUM_TOUCH_RECORDS(tt_stat);
+	u8 num_cur_tch = GET_NUM_TOUCHES(tt_stat);
 	uint32_t formated_output;
 	int rc;
 
@@ -219,16 +191,6 @@ static int cyttsp4_xy_worker(struct cyttsp4_debug_data *dd)
 	dd->interrupt_count++;
 	formated_output = dd->formated_output;
 	mutex_unlock(&dd->sysfs_lock);
-
-	/* Read command parameters */
-	rc = cyttsp4_read(dd->ttsp, CY_MODE_OPERATIONAL,
-			si->si_ofs.cmd_ofs + 1,
-			&si->xy_mode[si->si_ofs.cmd_ofs + 1],
-			si->si_ofs.rep_ofs - si->si_ofs.cmd_ofs - 1);
-	if (rc < 0) {
-		dev_err(dev, "%s: read fail on command parameter regs r=%d\n",
-				__func__, rc);
-	}
 
 	if (si->si_ofs.num_btns > 0) {
 		/* read button diff data */
@@ -246,42 +208,30 @@ static int cyttsp4_xy_worker(struct cyttsp4_debug_data *dd)
 	}
 
 	/* Interrupt */
-	/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
-	if(dd->ttsp->core->dbg_msg_level & 0x2)
-		pr_info("Interrupt(%u)\n", dd->interrupt_count);
-	/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
+	pr_info("Interrupt(%u)\n", dd->interrupt_count);
 
 	if (formated_output)
-		cyttsp4_debug_formated(dev, dd->pr_buf, si, num_cur_rec);
+		cyttsp4_debug_formated(dev, dd->pr_buf, si, num_cur_tch);
 	else
 		/* print data for TTHE */
-		cyttsp4_pr_buf_op_mode(dev, dd->pr_buf, si, num_cur_rec);
+		cyttsp4_pr_buf_op_mode(dev, dd->pr_buf, si, num_cur_tch);
 
-	if (dd->monitor.mntr_status == CY_MNTR_ENABLED) {
-		int offset = (si->si_ofs.max_tchs * si->si_ofs.tch_rec_size)
-				+ (si->si_ofs.num_btns
-					* si->si_ofs.btn_rec_size)
-				+ (si->si_ofs.tt_stat_ofs + 1);
-		rc = cyttsp4_read(dd->ttsp, CY_MODE_OPERATIONAL,
-				offset, &(dd->monitor.sensor_data[0]), 150);
-		if (rc < 0)
-			dev_err(dev, "%s: read fail on sensor monitor regs r=%d\n",
-					__func__, rc);
-		/* print data for the sensor monitor */
-		cyttsp4_debug_print(dev, dd->pr_buf, dd->monitor.sensor_data,
+#ifdef SHOK_SENSOR_DATA_MODE
+	/* print data for the sensor monitor */
+	if (si->monitor.mntr_status == CY_MNTR_STARTED) {
+		cyttsp4_debug_print(dev, dd->pr_buf, si->monitor.sensor_data,
 				150, "cyttsp4_sensor_monitor");
 	}
-	/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
-	if(dd->ttsp->core->dbg_msg_level & 0x2)
-		pr_info("\n");
-	/* [OPT]BugID:148, Implement Enable/Disable debug message, 20130918, Add Start */
+#endif
+
+	pr_info("\n");
 
 	dev_vdbg(dev, "%s: done\n", __func__);
 
 	return 0;
 }
 
-static int cyttsp4_debug_op_attention(struct cyttsp4_device *ttsp)
+static int cyttsp4_debug_attention(struct cyttsp4_device *ttsp)
 {
 	struct device *dev = &ttsp->dev;
 	struct cyttsp4_debug_data *dd = dev_get_drvdata(dev);
@@ -295,40 +245,6 @@ static int cyttsp4_debug_op_attention(struct cyttsp4_device *ttsp)
 		dev_err(dev, "%s: xy_worker error r=%d\n", __func__, rc);
 
 	return rc;
-}
-
-static int cyttsp4_debug_cat_attention(struct cyttsp4_device *ttsp)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_debug_data *dd = dev_get_drvdata(dev);
-	struct cyttsp4_sysinfo *si = dd->si;
-	u8 cat_masked_cmd;
-
-	dev_vdbg(dev, "%s\n", __func__);
-
-	/* Check for CaT command executed */
-	cat_masked_cmd = si->xy_mode[CY_REG_CAT_CMD] & CY_CMD_MASK;
-	if (cat_masked_cmd == CY_CMD_CAT_START_SENSOR_DATA_MODE) {
-		dev_vdbg(dev, "%s: Sensor data mode enabled\n", __func__);
-		dd->monitor.mntr_status = CY_MNTR_ENABLED;
-	} else if (cat_masked_cmd == CY_CMD_CAT_STOP_SENSOR_DATA_MODE) {
-		dev_vdbg(dev, "%s: Sensor data mode disabled\n", __func__);
-		dd->monitor.mntr_status = CY_MNTR_DISABLED;
-	}
-
-	return 0;
-}
-
-static int cyttsp4_debug_startup_attention(struct cyttsp4_device *ttsp)
-{
-	struct device *dev = &ttsp->dev;
-	struct cyttsp4_debug_data *dd = dev_get_drvdata(dev);
-
-	dev_vdbg(dev, "%s\n", __func__);
-
-	dd->monitor.mntr_status = CY_MNTR_DISABLED;
-
-	return 0;
 }
 
 static ssize_t cyttsp4_interrupt_count_show(struct device *dev,
@@ -407,7 +323,7 @@ static int cyttsp4_debug_probe(struct cyttsp4_device *ttsp)
 	int rc;
 
 	dev_info(dev, "%s: startup\n", __func__);
-//	dev_dbg(dev, "%s: debug on\n", __func__);
+	dev_dbg(dev, "%s: debug on\n", __func__);
 	dev_vdbg(dev, "%s: verbose debug on\n", __func__);
 
 	/* get context and debug print buffers */
@@ -439,6 +355,7 @@ static int cyttsp4_debug_probe(struct cyttsp4_device *ttsp)
 
 	pm_runtime_enable(dev);
 
+	pm_runtime_get_sync(dev);
 	dd->si = cyttsp4_request_sysinfo(ttsp);
 	if (dd->si == NULL) {
 		dev_err(dev, "%s: Fail get sysinfo pointer from core\n",
@@ -448,38 +365,19 @@ static int cyttsp4_debug_probe(struct cyttsp4_device *ttsp)
 	}
 
 	rc = cyttsp4_subscribe_attention(ttsp, CY_ATTEN_IRQ,
-		cyttsp4_debug_op_attention, CY_MODE_OPERATIONAL);
+		cyttsp4_debug_attention, CY_MODE_OPERATIONAL);
 	if (rc < 0) {
-		dev_err(dev, "%s: Error, could not subscribe Operating mode attention cb\n",
+		dev_err(dev, "%s: Error, could not subscribe attention cb\n",
 				__func__);
-		goto cyttsp4_debug_probe_subscribe_op_failed;
+		goto cyttsp4_debug_probe_subscribe_failed;
 	}
+	pm_runtime_put(dev);
 
-	rc = cyttsp4_subscribe_attention(ttsp, CY_ATTEN_IRQ,
-		cyttsp4_debug_cat_attention, CY_MODE_CAT);
-	if (rc < 0) {
-		dev_err(dev, "%s: Error, could not subscribe CaT mode attention cb\n",
-				__func__);
-		goto cyttsp4_debug_probe_subscribe_cat_failed;
-	}
-
-	rc = cyttsp4_subscribe_attention(ttsp, CY_ATTEN_STARTUP,
-		cyttsp4_debug_startup_attention, 0);
-	if (rc < 0) {
-		dev_err(dev, "%s: Error, could not subscribe startup attention cb\n",
-				__func__);
-		goto cyttsp4_debug_probe_subscribe_startup_failed;
-	}
 	return 0;
 
-cyttsp4_debug_probe_subscribe_startup_failed:
-	cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_IRQ,
-		cyttsp4_debug_cat_attention, CY_MODE_CAT);
-cyttsp4_debug_probe_subscribe_cat_failed:
-	cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_IRQ,
-		cyttsp4_debug_op_attention, CY_MODE_OPERATIONAL);
-cyttsp4_debug_probe_subscribe_op_failed:
+cyttsp4_debug_probe_subscribe_failed:
 cyttsp4_debug_probe_sysinfo_failed:
+	pm_runtime_put(dev);
 	pm_runtime_suspend(dev);
 	pm_runtime_disable(dev);
 	dev_set_drvdata(dev, NULL);
@@ -501,18 +399,19 @@ static int cyttsp4_debug_release(struct cyttsp4_device *ttsp)
 	dev_dbg(dev, "%s\n", __func__);
 
 	if (dev_get_drvdata(&ttsp->core->dev) == NULL) {
-		dev_err(dev, "%s: Unable to un-subscribe attention\n",
+		dev_err(dev, "%s: Error, core driver does not exist. " \
+			       "Unable to un-subscribe attention\n",
 				__func__);
 		goto cyttsp4_debug_release_exit;
 	}
 
-	/* Unsubscribe from attentions */
-	cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_IRQ,
-		cyttsp4_debug_op_attention, CY_MODE_OPERATIONAL);
-	cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_IRQ,
-		cyttsp4_debug_cat_attention, CY_MODE_CAT);
-	cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_STARTUP,
-		cyttsp4_debug_startup_attention, 0);
+	rc = cyttsp4_unsubscribe_attention(ttsp, CY_ATTEN_IRQ,
+		cyttsp4_debug_attention, CY_MODE_OPERATIONAL);
+	if (rc < 0) {
+		dev_err(dev, "%s: Error, could not un-subscribe attention\n",
+				__func__);
+		goto cyttsp4_debug_release_exit;
+	}
 
 cyttsp4_debug_release_exit:
 	pm_runtime_suspend(dev);
@@ -524,7 +423,7 @@ cyttsp4_debug_release_exit:
 	return rc;
 }
 
-static struct cyttsp4_driver cyttsp4_debug_driver = {
+struct cyttsp4_driver cyttsp4_debug_driver = {
 	.probe = cyttsp4_debug_probe,
 	.remove = cyttsp4_debug_release,
 	.driver = {
@@ -534,95 +433,45 @@ static struct cyttsp4_driver cyttsp4_debug_driver = {
 	},
 };
 
-static struct cyttsp4_debug_platform_data
+struct cyttsp4_debug_platform_data
 	_cyttsp4_debug_platform_data = {
 	.debug_dev_name = CYTTSP4_DEBUG_NAME,
 };
 
-static const char cyttsp4_debug_name[] = CYTTSP4_DEBUG_NAME;
-static struct cyttsp4_device_info
-	cyttsp4_debug_infos[CY_MAX_NUM_CORE_DEVS];
-
-static char *core_ids[CY_MAX_NUM_CORE_DEVS] = {
-	CY_DEFAULT_CORE_ID,
-	NULL,
-	NULL,
-	NULL,
-	NULL
+struct cyttsp4_device cyttsp4_debug_device = {
+	.name = CYTTSP4_DEBUG_NAME,
+	.core_id = "main_ttsp_core",
+	.dev = {
+		.platform_data = &_cyttsp4_debug_platform_data,
+	}
 };
-
-static int num_core_ids = 1;
-
-module_param_array(core_ids, charp, &num_core_ids, 0);
-MODULE_PARM_DESC(core_ids,
-	"Core id list of cyttsp4 core devices for debug module");
 
 static int __init cyttsp4_debug_init(void)
 {
-	int rc = 0;
-	int i, j;
+	int rc1;
+	int rc2;
 
-	/* Check for invalid or duplicate core_ids */
-	for (i = 0; i < num_core_ids; i++) {
-		if (!strlen(core_ids[i])) {
-			pr_err("%s: core_id %d is empty\n",
-				__func__, i+1);
-			return -EINVAL;
-		}
-		for (j = i+1; j < num_core_ids; j++)
-			if (!strcmp(core_ids[i], core_ids[j])) {
-				pr_err("%s: core_ids %d and %d are same\n",
-					__func__, i+1, j+1);
-				return -EINVAL;
-			}
+	rc1 = cyttsp4_register_device(&cyttsp4_debug_device);
+	if (rc1)
+		return -ENODEV;
+
+	rc2 = cyttsp4_register_driver(&cyttsp4_debug_driver);
+	if (rc2) {
+		cyttsp4_unregister_device(&cyttsp4_debug_device);
+		return -ENODEV;
 	}
 
-	for (i = 0; i < num_core_ids; i++) {
-		cyttsp4_debug_infos[i].name = cyttsp4_debug_name;
-		cyttsp4_debug_infos[i].core_id = core_ids[i];
-		cyttsp4_debug_infos[i].platform_data =
-			&_cyttsp4_debug_platform_data;
-		pr_info("%s: Registering debug device for core_id: %s\n",
-			__func__, cyttsp4_debug_infos[i].core_id);
-		rc = cyttsp4_register_device(&cyttsp4_debug_infos[i]);
-		if (rc < 0) {
-			pr_err("%s: Error, failed registering device\n",
-				__func__);
-			goto fail_unregister_devices;
-		}
-	}
-	rc = cyttsp4_register_driver(&cyttsp4_debug_driver);
-	if (rc) {
-		pr_err("%s: Error, failed registering driver\n", __func__);
-		goto fail_unregister_devices;
-	}
-
-	pr_info("%s: Cypress TTSP Debug (Built %s) rc=%d\n",
-		 __func__, CY_DRIVER_DATE, rc);
+	pr_info("%s: %s (Built %s @ %s),rc1=%d rc2=%d\n", __func__,
+			"Cypress TTSP Debug", __DATE__, __TIME__,
+			rc1, rc2);
 	return 0;
-
-fail_unregister_devices:
-	for (i--; i >= 0; i--) {
-		cyttsp4_unregister_device(cyttsp4_debug_infos[i].name,
-			cyttsp4_debug_infos[i].core_id);
-		pr_info("%s: Unregistering device access device for core_id: %s\n",
-			__func__, cyttsp4_debug_infos[i].core_id);
-	}
-	return rc;
 }
 module_init(cyttsp4_debug_init);
 
 static void __exit cyttsp4_debug_exit(void)
 {
-	int i;
-
+	cyttsp4_unregister_device(&cyttsp4_debug_device);
 	cyttsp4_unregister_driver(&cyttsp4_debug_driver);
-	for (i = 0; i < num_core_ids; i++) {
-		cyttsp4_unregister_device(cyttsp4_debug_infos[i].name,
-			cyttsp4_debug_infos[i].core_id);
-		pr_info("%s: Unregistering debug device for core_id: %s\n",
-			__func__, cyttsp4_debug_infos[i].core_id);
-	}
 	pr_info("%s: module exit\n", __func__);
 }
 module_exit(cyttsp4_debug_exit);

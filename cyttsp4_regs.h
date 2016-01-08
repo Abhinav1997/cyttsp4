@@ -8,6 +8,7 @@
  *
  * Copyright (C) 2012 Cypress Semiconductor
  * Copyright (C) 2011 Sony Ericsson Mobile Communications AB.
+ * Copyright (C) 2013 Sony Mobile Communications AB.
  *
  * Author: Aleksej Makarov <aleksej.makarov@sonyericsson.com>
  * Modified by: Cypress Semiconductor to add test modes and commands
@@ -33,100 +34,64 @@
 #ifndef _CYTTSP4_REGS_H
 #define _CYTTSP4_REGS_H
 
-#define CY_FW_FILE_NAME			"cyttsp4_fw.bin"
+#define CY_FW_FILE_NAME "cyttsp4_fw.bin"
 
-#define CY_DEFAULT_ADAP_MAX_XFER	512
-#define CY_ADAP_MIN_XFER		140
+#define CY_MAX_PRBUF_SIZE           PIPE_BUF
+#define CY_PR_TRUNCATED             " truncated..."
 
-#define CY_MAX_PRBUF_SIZE		PIPE_BUF
-#define CY_PR_TRUNCATED			" truncated..."
+#define CY_TMA1036_TCH_REC_SIZE     6
+#define CY_TMA4XX_TCH_REC_SIZE      9
+#define CY_TMA1036_MAX_TCH          0x0E
+#define CY_TMA4XX_MAX_TCH           0x1E
 
-#define CY_DEFAULT_CORE_ID		"main_ttsp_core"
-#define CY_MAX_NUM_CORE_DEVS		5
+#define GET_HSTMODE(reg)            (((reg) & 0x70) >> 4)
+#define GET_TOGGLE(reg)             (((reg) & 0x80) >> 7)
+#define IS_BOOTLOADER(reg)          (((reg) & 0x01) != 0)
+#define IS_EXCLUSIVE(dev)           ((dev) != NULL)
+#define IS_TMO(t)                   ((t) == 0)
 
-#define CY_TMA1036_MAX_TCH		0x0E
-#define CY_TMA4XX_MAX_TCH		0x1E
+#define CY_REG_BASE                 0x00
+#define CY_NUM_REVCTRL              8
+#define CY_NUM_MFGID                8
+#define CY_NUM_TCHREC               10
+#define CY_NUM_DDATA                32
+#define CY_NUM_MDATA                64
 
-#define IS_BOOTLOADER(hst_mode, reset_detect) \
-		((hst_mode) & 0x01 || (reset_detect) != 0)
-#define IS_BOOTLOADER_IDLE(hst_mode, reset_detect) \
-		((hst_mode) & 0x01 && (reset_detect) & 0x01)
-
-#define GET_HSTMODE(reg)		((reg & 0x70) >> 4)
-#define GET_TOGGLE(reg)			((reg & 0x80) >> 7)
-
-#define IS_LITTLEENDIAN(reg)		((reg & 0x01) == 1)
-#define GET_PANELID(reg)		(reg & 0x07)
-
-#define HI_BYTE(x)			(u8)(((x) >> 8) & 0xFF)
-#define LO_BYTE(x)			(u8)((x) & 0xFF)
-
-#define CY_REG_BASE			0x00
-#define CY_NUM_REVCTRL			8
-#define CY_NUM_DDATA			32
-#define CY_NUM_MDATA			64
-
-#define CY_REG_CAT_CMD			2
-#define CY_CMD_COMPLETE_MASK		(1 << 6)
-#define CY_CMD_MASK			0x3F
-
-#define CY_TTCONFIG_VERSION_OFFSET	8
-#define CY_TTCONFIG_VERSION_SIZE	2
-#define CY_TTCONFIG_VERSION_ROW		0
-
-#define CY_CONFIG_LENGTH_INFO_OFFSET	0
-#define CY_CONFIG_LENGTH_INFO_SIZE	4
-#define CY_CONFIG_LENGTH_OFFSET		0
-#define CY_CONFIG_LENGTH_SIZE		2
-#define CY_CONFIG_MAXLENGTH_OFFSET	2
-#define CY_CONFIG_MAXLENGTH_SIZE	2
-
-enum cyttsp4_ic_ebid {
-	CY_TCH_PARM_EBID,
-	CY_MDATA_EBID,
-	CY_DDATA_EBID,
-	CY_EBID_NUM,
-};
+#define CY_REG_CAT_CMD              2
+#define CY_CMD_COMPLETE_MASK        (1 << 6)
+#define CY_CMD_MASK                 0x3F
+#define CY_EBID                     0
 
 /* touch record system information offset masks and shifts */
-#define CY_BYTE_OFS_MASK		0x1F
-#define CY_BOFS_MASK			0xE0
-#define CY_BOFS_SHIFT			5
+#define CY_BYTE_OFS_MASK            0x1F
+#define CY_BOFS_MASK                0xE0
+#define CY_BOFS_SHIFT               5
+#define CY_ENDIANESS_MASK		0x01
+
+#define CY_REQUEST_EXCLUSIVE_TIMEOUT	1500
+
+/* maximum number of concurrent tracks */
+#define CY_NUM_TCH_ID               10
+
+#define CY_ACTIVE_STYLUS_ID         10
 
 /* helpers */
-#define GET_NUM_TOUCH_RECORDS(x)	((x) & 0x1F)
-#define IS_LARGE_AREA(x)		((x) & 0x20)
-#define IS_BAD_PKT(x)			((x) & 0x20)
-#define IS_TTSP_VER_GE(p, maj, min) \
-		((p)->si_ptrs.cydata == NULL ? \
-		0 : \
-		((p)->si_ptrs.cydata->ttsp_ver_major < (maj) ? \
-			0 : \
-			((p)->si_ptrs.cydata->ttsp_ver_minor < (min) ? \
-				0 : \
-				1)))
+#define GET_NUM_TOUCHES(x)          ((x) & 0x1F)
+#define IS_LARGE_AREA(x)            ((x) & 0x20)
+#define IS_BAD_PKT(x)               ((x) & 0x20)
 
-/* Timeout in ms. */
-#define CY_COMMAND_COMPLETE_TIMEOUT	500
-#define CY_CALIBRATE_COMPLETE_TIMEOUT	5000
-#define CY_WATCHDOG_TIMEOUT		1000
+#define CY_WATCHDOG_TIMEOUT msecs_to_jiffies(1000)
 
 /* drv_debug commands */
-#define CY_DBG_SUSPEND			4
-#define CY_DBG_RESUME			5
-#define CY_DBG_SOFT_RESET		97
-#define CY_DBG_RESET			98
-
-/* scan types */
-#define CY_SCAN_TYPE_GLOVE		0x8
-#define CY_SCAN_TYPE_STYLUS		0x10
-#define CY_SCAN_TYPE_PROXIMITY		0x40
-#define CY_SCAN_TYPE_APA_MC		0x80
+#define CY_DBG_SUSPEND                  4
+#define CY_DBG_RESUME                   5
+#define CY_DBG_SOFT_RESET               97
+#define CY_DBG_RESET                    98
 
 enum cyttsp4_hst_mode_bits {
 	CY_HST_TOGGLE      = (1 << 7),
 	CY_HST_MODE_CHANGE = (1 << 3),
-	CY_HST_DEVICE_MODE = (7 << 4),
+	CY_HST_MODE        = (7 << 4),
 	CY_HST_OPERATE     = (0 << 4),
 	CY_HST_SYSINFO     = (1 << 4),
 	CY_HST_CAT         = (2 << 4),
@@ -139,10 +104,44 @@ enum cyttsp_cmd_bits {
 	CY_CMD_COMPLETE    = (1 << 6),
 };
 
+enum cyttsp4_cmd_operate {
+	CY_CMD_OP_NULL,
+	CY_CMD_OP_RESERVED_1,
+	CY_CMD_OP_GET_PARA,
+	CY_CMD_OP_SET_PARA,
+	CY_CMD_OP_RESERVED_2,
+	CY_CMD_OP_GET_CFG_BLK_CRC,
+	CY_CMD_OP_RESERVED_N,
+};
+
+#define CY_OP_PARA_SCAN_TYPE			0x4B
+#define CY_OP_PARA_FINGER_THRESHOLD		0x53
+
+#define CY_OP_PARA_SCAN_TYPE_SZ			1
+#define CY_OP_PARA_FINGER_THRESHOLD_SZ		2
+
+#define CY_OP_PARA_FINGER_THRESHOLD_MIN_VAL	1
+#define CY_OP_PARA_FINGER_THRESHOLD_MAX_VAL	2000
+
+#define CY_OP_PARA_SCAN_TYPE_NORMAL		0
+#define CY_OP_PARA_SCAN_TYPE_GLOVE_MASK	(1<<3)
+#define CY_OP_PARA_SCAN_TYPE_STYLUS_MASK	(1<<4)
+#define CY_OP_PARA_SCAN_TYPE_HOVER_MASK		(1<<5)
+#define CY_OP_PARA_SCAN_TYPE_PROXIMITY_MASK	(1<<6)
+#define CY_OP_PARA_SCAN_TYPE_APAMC_MASK		(1<<7)
+
+enum cyttsp4_signal_disparity {
+	CY_SIGNAL_DISPARITY_NONE,
+	CY_SIGNAL_DISPARITY_SENSITIVITY,
+	CY_SIGNAL_DISPARITY_PROXIMITY,
+	CY_SIGNAL_DISPARITY_MAX,
+};
+
+
 enum cyttsp4_cmd_cat {
 	CY_CMD_CAT_NULL,
 	CY_CMD_CAT_RESERVED_1,
-	CY_CMD_CAT_GET_CFG_ROW_SZ,
+	CY_CMD_CAT_GET_CFG_BLK_SZ,
 	CY_CMD_CAT_READ_CFG_BLK,
 	CY_CMD_CAT_WRITE_CFG_BLK,
 	CY_CMD_CAT_RESERVED_2,
@@ -161,119 +160,28 @@ enum cyttsp4_cmd_cat {
 	CY_CMD_CAT_RESERVED_N,
 };
 
-enum cyttsp4_cmd_op {
-	CY_CMD_OP_NULL,
-	CY_CMD_OP_RESERVED_1,
-	CY_CMD_OP_GET_PARAM,
-	CY_CMD_OP_SET_PARAM,
-	CY_CMD_OP_RESERVED_2,
-	CY_CMD_OP_GET_CRC,
-	CY_CMD_OP_WAIT_FOR_EVENT,
+enum cyttsp4_calibrate_idacs_para {
+	CY_CAT_PARA_IDACS_MULTUAL_CAP_FINE,
+	CY_CAT_PARA_IDACS_MULTUAL_CAP_BUTTONS,
+	CY_CAT_PARA_IDACS_SELF_CAP
 };
 
-enum cyttsp4_cmd_status {
-	CY_CMD_STATUS_SUCCESS,
-	CY_CMD_STATUS_FAILURE,
+enum cyttsp4_tt_mode_bits {
+	CY_TT_BL     = (1 << 4),
+	CY_TT_INVAL  = (1 << 5),
+	CY_TT_CNTR   = (3 << 6),
 };
 
-/* Operational Mode Command Sizes */
-/* NULL Command */
-#define CY_CMD_OP_NULL_CMD_SZ			1
-#define CY_CMD_OP_NULL_RET_SZ			0
-/* Get Parameter */
-#define CY_CMD_OP_GET_PARAM_CMD_SZ		2
-#define CY_CMD_OP_GET_PARAM_RET_SZ		6
-/* Set Parameter */
-#define CY_CMD_OP_SET_PARAM_CMD_SZ		7
-#define CY_CMD_OP_SET_PARAM_RET_SZ		2
-/* Get Config Block CRC */
-#define CY_CMD_OP_GET_CFG_BLK_CRC_CMD_SZ	2
-#define CY_CMD_OP_GET_CFG_BLK_CRC_RET_SZ	3
-/* Wait For Event */
-#define CY_CMD_OP_WAIT_FOR_EVENT_CMD_SZ		2
-
-/* CaT Mode Command Sizes */
-/* NULL Command */
-#define CY_CMD_CAT_NULL_CMD_SZ			1
-#define CY_CMD_CAT_NULL_RET_SZ			0
-/* Get Config Row Size */
-#define CY_CMD_CAT_GET_CFG_ROW_SIZE_CMD_SZ	1
-#define CY_CMD_CAT_GET_CFG_ROW_SIZE_RET_SZ	2
-/* Read Config Block */
-#define CY_CMD_CAT_READ_CFG_BLK_CMD_SZ		6
-#define CY_CMD_CAT_READ_CFG_BLK_RET_SZ		7 /* + Data */
-#define CY_CMD_CAT_READ_CFG_BLK_RET_HDR_SZ	5
-/* Write Config Block */
-#define CY_CMD_CAT_WRITE_CFG_BLK_CMD_SZ		8 /* + Data + Security Key */
-#define CY_CMD_CAT_WRITE_CFG_BLK_RET_SZ		5
-#define CY_CMD_CAT_WRITE_CFG_BLK_CMD_HDR_SZ	6
-/* Load Self-Test Data */
-#define CY_CMD_CAT_LOAD_SELFTEST_DATA_CMD_SZ	6
-#define CY_CMD_CAT_LOAD_SELFTEST_DATA_RET_SZ	5 /* + Data */
-/* Run Self-Test */
-#define CY_CMD_CAT_RUN_SELFTEST_CMD_SZ		2
-#define CY_CMD_CAT_RUN_SELFTEST_RET_SZ		3
-/* Calibrate IDACs */
-#define CY_CMD_CAT_CALIBRATE_IDAC_CMD_SZ	2
-#define CY_CMD_CAT_CALIBRATE_IDAC_RET_SZ	1
-/* Get Self-Test Results */
-#define CY_CMD_CAT_GET_SELFTEST_RES_CMD_SZ	6
-#define CY_CMD_CAT_GET_SELFTEST_RES_RET_SZ	5 /* + Data */
-/* Initialize Baselines */
-#define CY_CMD_CAT_INIT_BASELINE_CMD_SZ		2
-#define CY_CMD_CAT_INIT_BASELINE_RET_SZ		1
-/* Execute Panel Scan */
-#define CY_CMD_CAT_EXECUTE_PANEL_SCAN_CMD_SZ	1
-#define CY_CMD_CAT_EXECUTE_PANEL_SCAN_RET_SZ	1
-/* Retrieve Panel Scan */
-#define CY_CMD_CAT_RETRIEVE_PANEL_SCAN_CMD_SZ	6
-#define CY_CMD_CAT_RETRIEVE_PANEL_SCAN_RET_SZ	5 /* + Data */
-/* Start Sensor Data Mode */
-#define CY_CMD_CAT_START_SENSOR_MODE_CMD_SZ	1 /* + Data */
-#define CY_CMD_CAT_START_SENSOR_MODE_RET_SZ	0 /* + Data */
-/* Stop Sensor Data Mode */
-#define CY_CMD_CAT_STOP_SENSOR_MODE_CMD_SZ	1
-#define CY_CMD_CAT_STOP_SENSOR_MODE_RET_SZ	0
-/* Interrupt Pin Override */
-#define CY_CMD_CAT_INT_PIN_OVERRIDE_CMD_SZ	2
-#define CY_CMD_CAT_INT_PIN_OVERRIDE_RET_SZ	1
-/* Retrieve Data Structure */
-#define CY_CMD_CAT_RETRIEVE_DATA_STRUCT_CMD_SZ	6
-#define CY_CMD_CAT_RETRIEVE_DATA_STRUCT_RET_SZ	5 /* + Data */
-/* Verify Config Block CRC */
-#define CY_CMD_CAT_VERIFY_CFG_BLK_CRC_CMD_SZ	2
-#define CY_CMD_CAT_VERIFY_CFG_BLK_CRC_RET_SZ	5
-
-#define CY_RAM_ID_ACTIVE_DISTANCE		0x4A
-#define CY_RAM_ID_SCAN_TYPE			0x4B
-#define CY_RAM_ID_LOW_POWER_INTERVAL		0x4C
-#define CY_RAM_ID_REFRESH_INTERVAL		0x4D
-#define CY_RAM_ID_ACTIVE_MODE_TIMEOUT		0x4E
-#define CY_RAM_ID_ACTIVE_LFT_INTERVAL		0x4F
-#define CY_RAM_ID_ACTIVE_DISTANCE2		0x50
-#define CY_RAM_ID_CHARGER_STATUS		0x51
-#define CY_RAM_ID_IMO_TRIM_VALUE		0x52
-#define CY_RAM_ID_FINGER_THRESHOLH		0x93
-#define CY_RAM_ID_DETECT_AREA_MARGIN_X		0x58
-#define CY_RAM_ID_DETECT_AREA_MARGIN_Y		0x59
-#define CY_RAM_ID_GRIP_XEDGE_A			0x70
-#define CY_RAM_ID_GRIP_XEDGE_B			0x71
-#define CY_RAM_ID_GRIP_XEXC_A			0x72
-#define CY_RAM_ID_GRIP_XEXC_B			0x73
-#define CY_RAM_ID_GRIP_YEDGE_A			0x74
-#define CY_RAM_ID_GRIP_YEDGE_B			0x75
-#define CY_RAM_ID_GRIP_YEXC_A			0x76
-#define CY_RAM_ID_GRIP_YEXC_B			0x77
-#define CY_RAM_ID_GRIP_FIRST_EXC		0x78
-#define CY_RAM_ID_GRIP_EXC_EDGE_ORIGIN		0x79
-#define CY_RAM_ID_PROX_ACTIVE_DIST_Z_VALUE	0x9B
-
-enum cyttsp4_scan_type {
-	CY_ST_APA_MC,
-	CY_ST_GLOVE,
-	CY_ST_STYLUS,
-	CY_ST_PROXIMITY,
+enum cyttsp4_bl_status_bits {
+	CY_BL_CS_OK    = (1 << 0),
+	CY_BL_WDOG     = (1 << 1),
+	CY_BL_RUNNING  = (1 << 4),
+	CY_BL_BUSY     = (1 << 7),
 };
+
+/* times */
+#define CY_SCAN_PERIOD              40
+#define CY_BL_ENTER_TIME            100
 
 enum cyttsp4_mode {
 	CY_MODE_UNKNOWN      = 0,
@@ -316,6 +224,18 @@ enum cyttsp4_ic_grpnum {
 	CY_IC_GRPNUM_NUM
 };
 
+#define CY_VKEYS_X 720
+#define CY_VKEYS_Y 1280
+
+enum cyttsp4_flags {
+	CY_FLAG_NONE = 0x00,
+	CY_FLAG_HOVER = 0x04,
+	CY_FLAG_FLIP = 0x08,
+	CY_FLAG_INV_X = 0x10,
+	CY_FLAG_INV_Y = 0x20,
+	CY_FLAG_VKEYS = 0x40,
+};
+
 enum cyttsp4_event_id {
 	CY_EV_NO_EVENT,
 	CY_EV_TOUCHDOWN,
@@ -324,17 +244,20 @@ enum cyttsp4_event_id {
 };
 
 enum cyttsp4_object_id {
-	CY_OBJ_STANDARD_FINGER = 0,
-	CY_OBJ_PROXIMITY       = 1,
-	CY_OBJ_STYLUS          = 2,
-	CY_OBJ_GLOVE           = 4,
+	CY_OBJ_STANDARD_FINGER,
+	CY_OBJ_LARGE_OBJECT,
+	CY_OBJ_STYLUS,
+	CY_OBJ_HOVER,
+	CY_OBJ_GLOVE,
 };
 
 #define CY_POST_CODEL_WDG_RST           0x01
 #define CY_POST_CODEL_CFG_DATA_CRC_FAIL 0x02
 #define CY_POST_CODEL_PANEL_TEST_FAIL   0x04
 
-/* test mode NULL command driver codes */
+#define CY_TEST_CMD_NULL                0
+
+/* test mode NULL command driver codes; D */
 enum cyttsp4_null_test_cmd_code {
 	CY_NULL_CMD_NULL,
 	CY_NULL_CMD_MODE,
@@ -371,6 +294,7 @@ struct cyttsp4_cydata {
 	u8 jtag_si_id1;
 	u8 jtag_si_id0;
 	u8 mfgid_sz;
+	u8 mfg_id[CY_NUM_MFGID];
 	u8 cyito_idh;
 	u8 cyito_idl;
 	u8 cyito_verh;
@@ -378,7 +302,6 @@ struct cyttsp4_cydata {
 	u8 ttsp_ver_major;
 	u8 ttsp_ver_minor;
 	u8 device_info;
-	u8 mfg_id[];
 } __packed;
 
 struct cyttsp4_test {
@@ -399,7 +322,8 @@ struct cyttsp4_pcfg {
 	u8 res_yl;
 	u8 max_zh;
 	u8 max_zl;
-	u8 panel_info0;
+	u8 panel_info;
+	u16 config_ver;
 } __packed;
 
 enum cyttsp4_tch_abs {	/* for ordering within the extracted touch data array */
@@ -430,8 +354,8 @@ static const char * const cyttsp4_tch_abs_string[] = {
 	[CY_TCH_NUM_ABS] = "INVALID"
 };
 
-#define CY_NUM_TCH_FIELDS		7
-#define CY_NUM_EXT_TCH_FIELDS		3
+#define CY_NUM_TCH_FIELDS       7
+#define CY_NUM_EXT_TCH_FIELDS   3
 
 struct cyttsp4_tch_rec_params {
 	u8 loc;
@@ -453,8 +377,6 @@ struct cyttsp4_opcfg {
 	u8 btn_diff_ofs;/* btn data loc ,diff counts, (Op-Mode byte ofs) */
 	u8 btn_diff_size;/* btn size of diff counts (in bits) */
 	struct cyttsp4_tch_rec_params tch_rec_new[CY_NUM_EXT_TCH_FIELDS];
-	u8 noise_data_ofs;
-	u8 noise_data_sz;
 } __packed;
 
 struct cyttsp4_sysinfo_data {
@@ -496,8 +418,8 @@ struct cyttsp4_tch_abs_params {
 	size_t bofs;	/* bit offset */
 };
 
-#define CY_NORMAL_ORIGIN		0	/* upper, left corner */
-#define CY_INVERT_ORIGIN		1	/* lower, right corner */
+#define CY_NORMAL_ORIGIN 0	/* upper, left corner */
+#define CY_INVERT_ORIGIN 1	/* lower, right corner */
 
 struct cyttsp4_sysinfo_ofs {
 	size_t chip_type;
@@ -512,7 +434,6 @@ struct cyttsp4_sysinfo_ofs {
 	size_t max_tchs;
 	size_t mode_size;
 	size_t data_size;
-	size_t rep_hdr_size;
 	size_t map_sz;
 	size_t max_x;
 	size_t x_origin;	/* left or right corner */
@@ -536,13 +457,12 @@ struct cyttsp4_sysinfo_ofs {
 	size_t btn_rec_size; /* btn record size (in bytes) */
 	size_t btn_diff_ofs;/* btn data loc ,diff counts, (Op-Mode byte ofs) */
 	size_t btn_diff_size;/* btn size of diff counts (in bits) */
-	size_t noise_data_ofs;
-	size_t noise_data_sz;
 };
 
 /* button to keycode support */
-#define CY_NUM_BTN_PER_REG		4
-#define CY_BITS_PER_BTN			2
+#define CY_NUM_BTN_PER_REG	4
+#define CY_NUM_BTN_EVENT_ID	4
+#define CY_BITS_PER_BTN		2
 
 enum cyttsp4_btn_state {
 	CY_BTN_RELEASED = 0,
@@ -556,20 +476,28 @@ struct cyttsp4_btn {
 	int key_code;
 };
 
-struct cyttsp4_ttconfig {
-	u16 version;
-	u16 length;
-	u16 max_length;
-	u16 crc;
+#ifdef SHOK_SENSOR_DATA_MODE
+enum cyttsp4_monitor_status {
+	CY_MNTR_DISABLED,
+	CY_MNTR_INITIATED,
+	CY_MNTR_STARTED,
 };
+
+struct cyttsp4_sensor_monitor {
+	enum cyttsp4_monitor_status mntr_status;
+	u8 sensor_data[150];		/* operational sensor data */
+};
+#endif
 
 struct cyttsp4_sysinfo {
 	bool ready;
 	struct cyttsp4_sysinfo_data si_data;
 	struct cyttsp4_sysinfo_ptr si_ptrs;
 	struct cyttsp4_sysinfo_ofs si_ofs;
-	struct cyttsp4_ttconfig ttconfig;
 	struct cyttsp4_btn *btn;	/* button states */
+#ifdef SHOK_SENSOR_DATA_MODE
+	struct cyttsp4_sensor_monitor monitor;
+#endif
 	u8 *btn_rec_data;		/* button diff count data */
 	u8 *xy_mode;			/* operational mode and status regs */
 	u8 *xy_data;			/* operational touch regs */
